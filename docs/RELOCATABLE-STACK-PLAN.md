@@ -893,3 +893,76 @@ missing. That is also the more honest form of the minimal-host claim this file
 is supposed to embody: the build log now prints exactly what each base image
 lacked, which is the number worth knowing, and `--allowerasing` — which would
 have "fixed" it by installing *more* than needed — is not used.
+
+---
+
+## Instruction-set portability (added after the review)
+
+A concern the original plan does not address at all: the stack is built on
+whatever CPU the build host happens to have, and ships to customers whose
+hardware may be considerably older. A library compiled with `-march=native` on
+an AVX-512 builder dies with `SIGILL` on a 2015 Xeon — at an arbitrary point
+mid-run, in a library nobody suspected, on a machine we never see. Nothing else
+in the pipeline notices: the tree relocates correctly, resolves correctly, and
+runs perfectly on the machine that built it.
+
+### What is actually true today, measured
+
+| | conda-forge injects | gcc default when nothing is injected |
+|---|---|---|
+| `linux-64` | `-march=nocona -mtune=haswell` (SSE3, 2004) | `-march=x86-64` (SSE2) |
+| `linux-aarch64` | **nothing** | `-march=armv8-a` (baseline) |
+
+So the *baseline* is conservative on both platforms already, and
+`lib/build_common.sh`'s `activate_toolchain` inherits it by sourcing the
+activation scripts. The exposure is narrower than it first looks — but it is
+real, for one specific reason:
+
+**`-march` is last-wins on a gcc command line, and `CFLAGS` are injected
+first.** conda-forge's `-march=nocona` therefore cannot override a build system
+that appends its own `-march`. Kokkos autodetecting the host architecture is the
+canonical offender, and it arrives with Trilinos.
+
+### Decision: a wrapper for what we compile, a gate for everything
+
+Both, because neither is sufficient alone.
+
+**`ISA_BASELINE_X86 ?= x86-64-v2`, `ISA_BASELINE_AARCH64 ?= armv8-a`.** v2 is
+SSE4.2 + popcnt, Nehalem/2009 and later — the level RHEL 9 itself requires, so
+it cannot exclude a host running a current distro, while being meaningfully
+faster than SSE2/SSE3 for numerics. `armv8-a` is universal on aarch64; SVE is
+the hazard there and is not baseline.
+
+**A build-time compiler wrapper layer** (S2, next PR), in the spirit of
+[NCAR's `ncarcompilers`](https://github.com/NCAR/ncarcompilers), which
+establishes the precedent of intercepting compiler invocations to inject flags
+transparently regardless of build-system complexity. Adapted rather than
+vendored: ncarcompilers carries assumptions about NCAR's module environment that
+do not apply here, and our need is narrower — append `-march=$(ISA_BASELINE)`
+*last* so it wins, and hard-error on `-march=native` rather than silently
+correcting it. Wrappers live outside the shipped tree and go on `PATH` only
+during source builds, so the artifact is unchanged.
+
+**An ISA verification gate on the artifact** (`relocate/isa-scan.py`), because
+the wrapper is blind to the ~58 conda-forge packages that arrive prebuilt —
+which is *100% of the current 60 MB tarball*. Every ELF is disassembled and
+scanned for instructions above the baseline. Disassembly rather than
+`.note.gnu.property`, because that note carries an x86 ISA level only when built
+with `-march=x86-64-vN` specifically and misses `-march=haswell` entirely.
+
+Three details that matter:
+
+- **Runtime dispatch is allowlisted.** OpenBLAS (`DYNAMIC_ARCH`), MKL and OpenSSL
+  deliberately ship AVX-512 kernels selected by a CPUID check at startup. Those
+  are correct. Flagging them would mean flagging correct behaviour on precisely
+  the libraries where a hit is expected — the fastest way to train ourselves to
+  ignore the gate. They are reported separately instead.
+- **The scan runs during `relocate`**, while `objdump` is still in the tree —
+  `binutils` is on `prune.list`. The report is filtered by which files still
+  exist, so one scan serves both validate stages. Same constraint that forces
+  slim before prune (A17).
+- **The patterns are self-tested** (`isa-scan.py --self-test`). Without that,
+  "0 objects above baseline" on x86-64 would be indistinguishable from "the
+  regexes never matched anything" — and the x86 patterns cannot be exercised on
+  an aarch64 development machine. The aarch64 patterns are additionally checked
+  against real compiler output.

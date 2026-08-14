@@ -15,6 +15,12 @@ MPI_VERSION     ?= 5.0.1
 HDF5_VERSION    ?= 1.14
 HDF5_PARALLEL   ?= no
 RPATH_MODE      ?= rpath
+# Instruction-set floor for the shipped binaries.  x86-64-v2 is SSE4.2+popcnt,
+# Nehalem/2009 and later -- the level RHEL 9 itself requires, so it cannot
+# exclude a host running a current distro.  armv8-a is the aarch64 baseline and
+# is universal; SVE is the hazard there.  See amendment A21.
+ISA_BASELINE_X86     ?= x86-64-v2
+ISA_BASELINE_AARCH64 ?= armv8-a
 SLIM_PROFILE    ?= devel
 SHIP_PYTHON     ?= no
 SMOKE_RANKS     ?= 4
@@ -36,6 +42,8 @@ DIST_DIR    ?= $(CURDIR)/dist
 CONDA       := $(CONDA_HOME)/bin/conda
 export CONDARC        := $(CONDA_HOME)/condarc
 export CONDA_PKGS_DIRS ?= $(CONDA_HOME)/pkgs
+
+ISA_BASELINE := $(if $(filter linux-aarch64,$(TARGET_PLATFORM)),$(ISA_BASELINE_AARCH64),$(ISA_BASELINE_X86))
 
 TARBALL := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).tar.gz
 

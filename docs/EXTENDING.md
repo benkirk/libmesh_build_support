@@ -73,6 +73,38 @@ Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
 Use these for site policy — extra validation, signing, publishing — rather than
 editing tracked files.
 
+## Instruction-set baseline
+
+Your package is compiled through a wrapper layer that appends
+`-march=$(ISA_BASELINE)` **last**, so it wins over anything your build system
+sets. Defaults are `x86-64-v2` and `armv8-a`; override with `ISA_BASELINE_X86` /
+`ISA_BASELINE_AARCH64` in `config.mk`.
+
+This is not belt-and-braces. `-march` is last-wins on a gcc command line and
+`CFLAGS` are injected first, so a build system that appends its own `-march`
+silently beats any baseline set through the environment. The failure mode is a
+`SIGILL` on the customer's older CPU, mid-run, in a library nobody suspected.
+
+`-march=native` is rejected outright rather than quietly rewritten — if your
+package wants it, that is worth knowing about.
+
+Whatever the wrappers do, `relocate/isa-scan.py` disassembles every shipped
+object and the validator fails on anything above the baseline. Libraries that
+dispatch on CPUID at runtime (OpenBLAS, MKL, OpenSSL) are allowlisted, because
+for them a high-ISA kernel is correct. If your package does its own runtime
+dispatch, say so — it needs adding to that list.
+
+## The shipped artifact has no compiler
+
+`conda/prune.list` drops `gcc_impl` and the sysroot — about 530 MB, and most of
+the reason the tarball is 60 MB rather than 600. So the tarball ships `mpicc`
+and nothing behind it.
+
+That is deliberate. The supported way to build against this stack is **inside
+the template, before the prune**, which is exactly what `site/` is for. A
+customer compiling against the shipped tarball uses their own compiler; `mpicc`
+is still useful to them via `mpicc -show` and `MPICH_CC`.
+
 ## Things that will bite you
 
 - **`dlopen`ed plugins are invisible to `ldd`.** If your package loads modules

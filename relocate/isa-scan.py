@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""Scan every ELF object for instructions above the declared ISA baseline.
+
+The failure this exists to catch is the worst kind: a stack built on a modern
+build host that dies with SIGILL on the customer's older CPU, at some arbitrary
+point during a run, in a library nobody suspected.  Nothing else in the
+pipeline would notice -- the tree relocates correctly, resolves correctly, and
+runs perfectly well on the machine that built it.
+
+Two things make this worth doing as a scan of the ARTIFACT rather than trusting
+the compiler flags:
+
+  1. Most of the tree was not compiled by us.  ~58 conda-forge packages arrive
+     prebuilt, and no amount of care with our own CFLAGS says anything about
+     them.  (conda-forge does target a conservative baseline -- '-march=nocona'
+     on x86-64, nothing at all on aarch64, where gcc defaults to armv8-a -- but
+     that is a policy we do not control and cannot enforce.)
+  2. '-march' is last-wins on a gcc command line and CFLAGS are injected first,
+     so any build system that appends its own -march silently beats the
+     baseline.  Kokkos autodetecting the host architecture is the canonical
+     example, and it is coming with Trilinos.
+
+RUNTIME DISPATCH is the subtlety.  OpenBLAS (DYNAMIC_ARCH), MKL, and OpenSSL
+deliberately ship AVX-512 kernels selected by a CPUID check at startup.  Those
+are correct and must not be flagged -- doing so would train us to ignore this
+check, on exactly the libraries where a hit is expected.  They are allowlisted
+by SONAME and reported separately so they stay visible.
+
+Detection is by disassembly, because it is the only thing that observes what
+was actually emitted.  '.note.gnu.property' carries an x86 ISA level only when
+built with '-march=x86-64-vN' specifically, so it misses '-march=haswell' and
+everything like it.
+"""
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# --- x86-64 microarchitecture levels -----------------------------------------
+# v1 baseline: SSE, SSE2.  v2 adds SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT.
+# v3 adds AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.  v4 adds AVX-512.
+X86_V4 = re.compile(
+    r"%zmm|\{%k[0-7]\}|\bvpternlog|\bvpcompress|\bvpexpand|\bvpconflict|"
+    r"\bvgatherpf|\bvscatter|\bvrangep|\bvreducep|\bvfpclass")
+X86_V3 = re.compile(
+    r"%ymm|\bvfmadd|\bvfmsub|\bvfnmadd|\bvfnmsub|\bvperm2i128|\bvpbroadcast|"
+    r"\bbzhi\b|\bpdep\b|\bpext\b|\bmulx\b|\brorx\b|\bsarx\b|\bshlx\b|\bshrx\b|"
+    r"\bandn\b|\bblsi\b|\bblsr\b|\bblsmsk\b|\btzcnt\b|\blzcnt\b|\bmovbe\b")
+X86_V2 = re.compile(
+    r"\bpopcnt\b|\bpcmpgtq\b|\bpblend|\bptest\b|\bround[ps][sd]\b|"
+    r"\bpmovzx|\bpmovsx|\bcrc32\b|\bcmpxchg16b\b")
+
+# --- aarch64 --------------------------------------------------------------
+# armv8-a is the baseline and is universal.  SVE/SVE2 and SME are the real
+# hazards: hardware support is far from universal, and unlike x86 there is no
+# widely-used runtime-dispatch convention for them.
+ARM_SVE = re.compile(
+    r"\bz\d+\.[bhsdq]\b|\bp\d+/[mz]\b|\bptrue\b|\bwhilel[oet]\b|"
+    r"\bcnt[bhwd]\b|\brdvl\b|\bsmstart\b|\bsmstop\b")
+# armv8.2-a extensions.  Broadly available on server parts, so informational.
+ARM_82 = re.compile(r"\b[su]dot\b|\bfmlal\b|\bbfdot\b|\bbfmmla\b|\b[su]mmla\b")
+# armv8.1-a large-system atomics.  Present on essentially every server core;
+# recorded but never fatal.
+ARM_LSE = re.compile(r"\bld(add|clr|eor|set|smax|smin|umax|umin)\b|\bcas[ap]?\b|\bswp[ap]?\b")
+
+X86_LEVELS = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
+ARM_LEVELS = ["armv8-a", "armv8.1-a", "armv8.2-a", "armv8-a+sve"]
+
+# Libraries that dispatch on CPUID at runtime and therefore legitimately carry
+# kernels above the baseline.  Matched against the file's basename.
+RUNTIME_DISPATCH = (
+    "libopenblas", "libblas", "liblapack", "libmkl", "libcblas",
+    "libcrypto", "libssl",          # OpenSSL: AES-NI / AVX via CPUID
+    "libzstd", "libz.", "libz-ng",  # both dispatch on SSE/AVX
+    "libgomp",                      # ships multiversioned loops
+)
+
+
+EM_X86_64, EM_AARCH64 = 62, 183
+
+def elf_machine(path):
+    """Return e_machine, or None if this is not an ELF.
+
+    Knowing the architecture matters: applying the x86 patterns to an aarch64
+    object produced confident nonsense the first time this ran ("x86-64-v2" on
+    libz.so), because aarch64 disassembly happens to contain matching text.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    little = head[5] == 1
+    return int.from_bytes(head[18:20], "little" if little else "big")
+
+
+# An instruction line from 'objdump -d --no-show-raw-insn' looks like:
+#     "  4004ec:\tbl\t400430 <printf@plt>"
+# Everything up to the first tab is the address; everything inside <> is a
+# symbol annotation, not code.  Matching the raw line means matching symbol
+# NAMES -- which is how "crc32" in <crc32_z@plt> got read as a crc32
+# instruction, and how an aarch64 library was reported as needing x86-64-v2.
+INSN_LINE = re.compile(r"^\s*[0-9a-f]+:\t(.*)$")
+ANNOTATION = re.compile(r"<[^>]*>|//.*$|;.*$|#.*$")
+
+
+def instructions(text):
+    """Yield just the mnemonic+operand text of each disassembled instruction."""
+    out = []
+    for line in text.splitlines():
+        m = INSN_LINE.match(line)
+        if m:
+            out.append(ANNOTATION.sub("", m.group(1)))
+    return "\n".join(out)
+
+
+def scan_one(args):
+    path, root, objdump, machine = args
+    rel = os.path.relpath(path, root)
+    try:
+        out = subprocess.run(
+            [objdump, "-d", "--no-show-raw-insn", path],
+            capture_output=True, text=True, errors="replace", timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return rel, {"error": str(exc) or type(exc).__name__}
+    if not out.stdout:
+        return rel, {"error": "no disassembly (stripped of .text?)"}
+    text = instructions(out.stdout)
+
+    found = []
+    if machine == EM_X86_64:
+        if X86_V4.search(text):
+            found.append("x86-64-v4")
+        if X86_V3.search(text):
+            found.append("x86-64-v3")
+        if X86_V2.search(text):
+            found.append("x86-64-v2")
+    elif machine == EM_AARCH64:
+        if ARM_SVE.search(text):
+            found.append("armv8-a+sve")
+        if ARM_82.search(text):
+            found.append("armv8.2-a")
+        if ARM_LSE.search(text):
+            found.append("armv8.1-a")
+    return rel, {"features": sorted(found)}
+
+
+def highest(features, levels):
+    best = levels[0]
+    for f in features:
+        if f in levels and levels.index(f) > levels.index(best):
+            best = f
+    return best
+
+
+# Representative objdump output, in the AT&T syntax objdump emits by default.
+# This exists because the x86 patterns cannot be exercised on an aarch64
+# development machine: without it, "0 objects above baseline" on x86-64 would be
+# indistinguishable from "the regexes never matched anything".  The aarch64
+# patterns are covered the same way and additionally against real compiler
+# output (see the PR).  Run with --self-test.
+SELF_TEST = [
+    # (sample line, expected feature or None)
+    ("  401136:\tvaddpd %ymm0,%ymm1,%ymm2", "x86-64-v3"),
+    ("  401140:\tvfmadd213sd %xmm2,%xmm1,%xmm0", "x86-64-v3"),
+    ("  401150:\tbzhi   %eax,%ebx,%ecx", "x86-64-v3"),
+    ("  401160:\tvaddpd %zmm1,%zmm2,%zmm3{%k1}", "x86-64-v4"),
+    ("  401170:\tvpternlogd $0xff,%zmm0,%zmm0,%zmm0", "x86-64-v4"),
+    ("  401180:\tpopcnt %eax,%edx", "x86-64-v2"),
+    ("  401190:\tpcmpgtq %xmm1,%xmm0", "x86-64-v2"),
+    ("  4011a0:\taddsd  %xmm1,%xmm0", None),
+    ("  4011b0:\tmovaps %xmm0,(%rax)", None),
+    ("  4011c0:\tld1w   {z0.s},p0/z,[x0]", "armv8-a+sve"),
+    ("  4011d0:\tptrue  p0.d", "armv8-a+sve"),
+    ("  4011e0:\tsdot   v0.4s,v1.16b,v2.16b", "armv8.2-a"),
+    ("  4011f0:\tldadd  w1,w2,[x0]", "armv8.1-a"),
+    ("  401200:\tfadd   d0,d1,d2", None),
+]
+
+
+# Lines that must NOT match anything.  These are the false positives the first
+# run of this scanner actually produced: symbol names inside <> annotations were
+# being read as instructions, which is how an aarch64 libz.so came back
+# "requiring x86-64-v2".  Every one of these is a real line shape from objdump.
+SELF_TEST_NEGATIVE = [
+    "  400430:\tbl\t400abc <crc32_z@plt>",
+    "  400440:\tbl\t400b00 <__popcountdi2@plt>",
+    "  400450:\tadrp\tx0, 411000 <ptest_data>",
+    "  400460:\tb\t400c00 <sve_helper>",
+    "  400470:\tcall   401050 <lzcnt_table>",
+    "  400480:\tmov    %rax,%rbx  # ymm not used here",
+]
+
+
+def self_test():
+    checks = [(X86_V4, "x86-64-v4"), (X86_V3, "x86-64-v3"), (X86_V2, "x86-64-v2"),
+              (ARM_SVE, "armv8-a+sve"), (ARM_82, "armv8.2-a"), (ARM_LSE, "armv8.1-a")]
+
+    def verdict(raw):
+        text = instructions(raw)
+        return next((name for rx, name in checks if rx.search(text)), None)
+
+    failures = 0
+    print("  -- must match --")
+    for line, want in SELF_TEST:
+        got = verdict(line)
+        if got != want:
+            failures += 1
+        print(f"  {'ok  ' if got == want else 'FAIL'} {line.strip():44} -> {got}")
+    print("  -- must NOT match (symbol names are not instructions) --")
+    for line in SELF_TEST_NEGATIVE:
+        got = verdict(line)
+        if got is not None:
+            failures += 1
+        print(f"  {'ok  ' if got is None else 'FAIL'} {line.strip():44} -> {got}")
+    total = len(SELF_TEST) + len(SELF_TEST_NEGATIVE)
+    print(f"self-test: {total - failures}/{total} passed")
+    return 1 if failures else 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--self-test", action="store_true",
+                    help="check the instruction patterns against known objdump output")
+    ap.add_argument("--root")
+    ap.add_argument("--objdump", default=None,
+                    help="defaults to <root>/bin/*-objdump, then PATH")
+    ap.add_argument("--out", help="where to write the JSON report")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    a = ap.parse_args(argv)
+
+    if a.self_test:
+        return self_test()
+    if not a.root or not a.out:
+        ap.error("--root and --out are required unless --self-test")
+
+    root = os.path.abspath(a.root)
+    objdump = a.objdump
+    if not objdump:
+        import glob
+        cand = sorted(glob.glob(os.path.join(root, "bin", "*-objdump")))
+        objdump = cand[0] if cand else shutil.which("objdump")
+    if not objdump:
+        # Deliberately not fatal.  This scan runs during 'relocate', when
+        # binutils is still present; if someone runs it later, after prune has
+        # removed binutils, saying so beats failing the build.
+        print("isa-scan: no objdump available; skipping", file=sys.stderr)
+        json.dump({"skipped": "no objdump"}, open(a.out, "w"))
+        return 0
+
+    targets = []
+    for dirpath, _d, filenames in os.walk(root):
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if os.path.islink(p) or fn.endswith((".a", ".la", ".py", ".pyc")):
+                continue
+            m = elf_machine(p)
+            if m in (EM_X86_64, EM_AARCH64):
+                targets.append((p, root, objdump, m))
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:
+        for rel, info in pool.map(scan_one, targets):
+            results[rel] = info
+
+    report = {
+        "root": root,
+        "objdump": objdump,
+        "scanned": len(results),
+        "files": results,
+    }
+    with open(a.out, "w") as fh:
+        json.dump(report, fh, indent=1, sort_keys=True)
+
+    n_flagged = sum(1 for v in results.values() if v.get("features"))
+    print(f"isa-scan: {len(results)} objects scanned, "
+          f"{n_flagged} carry above-baseline instructions -> {a.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -40,6 +40,7 @@ define do_validate
 	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
 	  GCC_VERSION='$(GCC_VERSION)' MPI_PROVIDER='$(MPI_PROVIDER)' \
 	  HDF5_PARALLEL='$(HDF5_PARALLEL)' SLIM_PROFILE='$(SLIM_PROFILE)' \
+	  ISA_BASELINE='$(ISA_BASELINE)' ISA_REPORT='$(WORK)/relocate/isa-scan.json' \
 	  bash relocate/validate.sh --full --stage '$(1)' '$(STACK)'
 endef
 
@@ -94,6 +95,13 @@ $(STAMPS)/relocate.stamp: $(STAMPS)/test-built.stamp \
 	$(Q)env $(PKG_ENV) bash relocate/patchelf.sh
 	$(SAY) FIXUP 'embedded paths'
 	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' bash relocate/fixup-text.sh
+# The ISA scan needs objdump, which prune.list removes along with the rest of
+# binutils -- so it runs here, while the toolchain is still in the tree, and
+# writes a report both validate stages read.  Same constraint that forces slim
+# before prune; see A17.
+	$(SAY) ISA-SCAN '$(ISA_BASELINE)'
+	$(Q)"$(CONDA_HOME)/bin/python" relocate/isa-scan.py --root '$(STACK)' \
+	  --out '$(WORK)/relocate/isa-scan.json' --jobs '$(NPROC)'
 	$(call run_hooks,post-relocate)
 	$(Q)touch $@
 
@@ -174,7 +182,7 @@ print-config:
 	  TARGET_PLATFORM '$(TARGET_PLATFORM)' GLIBC_FLOOR '$(GLIBC_FLOOR)' \
 	  GCC_VERSION '$(GCC_VERSION)' BLAS_PROVIDER '$(BLAS_PROVIDER)' \
 	  MPI_FAMILY '$(MPI_FAMILY)' MPI_PROVIDER '$(MPI_PROVIDER)' \
-	  MPI_VERSION '$(MPI_VERSION)' \
+	  MPI_VERSION '$(MPI_VERSION)' ISA_BASELINE '$(ISA_BASELINE)' \
 	  HDF5_VERSION '$(HDF5_VERSION)' HDF5_PARALLEL '$(HDF5_PARALLEL)' \
 	  RPATH_MODE '$(RPATH_MODE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \

@@ -223,6 +223,66 @@ PY
   [ "${N_OPT}" -eq 0 ] || warn "${N_OPT} optional host-GPU reference(s) (expected; UCX CUDA plugins)"
 
   #----------------------------------------------------------------------------
+  # 6. Instruction-set floor.  Reads the report written during 'relocate', while
+  # objdump was still in the tree, and filters it to the files that survived
+  # pruning -- so one scan serves both stages without re-running.
+  #
+  # This is the one defect that would reach the customer as a SIGILL in the
+  # middle of a run, on a machine we never see, in a library nobody suspected.
+  if [ -s "${ISA_REPORT:-}" ]; then
+    eval "$("${PY}" - "${ISA_REPORT}" "${ROOT}" "${ISA_BASELINE:-x86-64-v2}" <<'ISAPY'
+import json, os, sys
+rep = json.load(open(sys.argv[1]))
+root, baseline = sys.argv[2], sys.argv[3]
+X86 = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
+ARM = ["armv8-a", "armv8.1-a", "armv8.2-a", "armv8-a+sve"]
+levels = ARM if baseline.startswith("armv8") else X86
+DISPATCH = ("libopenblas", "libblas", "liblapack", "libmkl", "libcblas",
+            "libcrypto", "libssl", "libzstd", "libz.", "libz-ng", "libgomp")
+def rank(f):
+    return levels.index(f) if f in levels else -1
+base = rank(baseline)
+over, dispatched, scanned = [], [], 0
+for rel, info in rep.get("files", {}).items():
+    if not os.path.exists(os.path.join(root, rel)):
+        continue                       # pruned since the scan; not our problem
+    scanned += 1
+    feats = info.get("features", [])
+    worst = max(feats, key=rank) if feats else None
+    if worst is None or rank(worst) <= base:
+        continue
+    entry = {"file": rel, "isa": worst}
+    if os.path.basename(rel).startswith(DISPATCH):
+        dispatched.append(entry)
+    else:
+        over.append(entry)
+print("ISA_SCANNED=%d" % scanned)
+print("ISA_OVER=%d" % len(over))
+print("ISA_DISPATCH=%d" % len(dispatched))
+print("ISA_SAMPLE=" + json.dumps(
+    "\n".join("          %s: %s" % (e["file"], e["isa"]) for e in over[:12])))
+ISAPY
+)"
+    if [ "${ISA_OVER}" -eq 0 ]; then
+      ok "all ${ISA_SCANNED} objects within ISA baseline ${ISA_BASELINE:-x86-64-v2}"
+    else
+      # Advisory pre-slim, like the other closure properties: nearly every hit
+      # at that point is in the sysroot glibc or the compiler binaries, which
+      # prune removes.  Fatal once the tree is final.
+      soft "${ISA_OVER} object(s) exceed ISA baseline ${ISA_BASELINE:-x86-64-v2} -- these SIGILL on older CPUs:"
+      printf '%b\n' "${ISA_SAMPLE}"
+    fi
+    # Runtime-dispatch libraries legitimately carry higher kernels behind a
+    # CPUID check.  Reported, never fatal -- flagging them would be flagging
+    # correct behaviour, on precisely the libraries where a hit is expected.
+    [ "${ISA_DISPATCH}" -eq 0 ] || \
+      warn "${ISA_DISPATCH} runtime-dispatch librar(ies) carry above-baseline kernels (expected: OpenBLAS/MKL/OpenSSL select on CPUID)"
+  else
+    warn "no ISA scan report at ${ISA_REPORT:-<unset>}; instruction-set floor NOT checked"
+  fi
+
+
+  #----------------------------------------------------------------------------
   # The manifest: what this artifact actually is.
   mkdir -p "${ROOT}/etc"
   "${PY}" - "${ROOT}" "${GLIBC_MEASURED}" "${GLIBC_FLOOR}" <<'PY'
