@@ -78,9 +78,16 @@ relocate/depsolve.py  patchelf.sh  fixup-text.sh  prune.sh  slim.sh  validate.sh
 stack/activate.sh.in      template for the shipped activation script
 test/smoke/               owner-provided libMesh example lands here
 test/run.sh               harness, MODE = inplace | relocated
+docker/Dockerfile.builder  Dockerfile.verify  compose.yaml  bases.env
 docs/EXTENDING.md
-ARCHIVE.md  README.md
+ARCHIVE.md  README.md  .dockerignore
 ```
+
+`docker/Dockerfile.builder` is worth calling out as more than convenience: because it
+installs only what a bare host genuinely needs (`curl`, `ca-certificates`, `tar`,
+`bzip2`, a shell — conda supplies the compilers), it is the **executable statement of
+this project's minimal-host claim**. If it ever needs a dev package added, that is a
+regression in the premise, not a fix to the image.
 
 ### Generated build root (step 0's "new, empty directory")
 
@@ -286,6 +293,61 @@ unknowns — timebox these first.
   the package-discovery glob working.
 - **Verify:** `make -n all` prints a sensible ordered plan; `make help` lists targets.
 
+### S0b — Local container dev loop (Docker Compose)
+Lands immediately after the scaffold, because it is the environment everything else is
+developed in. Primary driver: developing on an Apple Silicon Mac, where the build must
+not run on the host. S7's CI consumes these same files rather than reinventing them.
+
+**It is a local model of the CI topology, not a separate thing.** S7's shape is "build
+once, validate the same tarball everywhere" — so compose gets two services on
+*different* images, and the tarball is the only thing that crosses between them:
+
+```
+docker/Dockerfile.builder   ARG BASE_IMAGE — the minimal host set, nothing more
+docker/Dockerfile.verify    ARG BASE_IMAGE — deliberately empty; no compiler, no dev pkgs
+docker/compose.yaml
+docker/bases.env            the image matrix, shared with S7
+.dockerignore               must exclude $(BUILD_ROOT) — it reaches ~2 GB
+```
+
+Services: `build` (runs `make all`), `shell` (interactive iteration), and `verify`,
+which mounts only `dist/` read-only into a pristine image and untars, validates, and
+runs the smoke test. `verify` running on a *different, emptier* image than `build` is
+the point — it is `distcheck`'s guarantee made structural rather than assumed.
+
+**The volume layout is the part that matters, and it maps onto the plan's existing
+split.** Docker Desktop bind mounts on macOS are slow for many-small-file workloads,
+and a conda env plus a PETSc build is exactly that workload:
+
+| path | mount | why |
+|---|---|---|
+| repo → `/src` | bind mount | small, edited from the host, wants to be live |
+| `$(BUILD_ROOT)` → `/build` | **named volume** | ~2 GB and hundreds of thousands of files; a bind mount here is the difference between minutes and hours |
+| `CONDA_PKGS_DIRS` → `/cache/conda-pkgs` | named volume | the measured 2.3 GB cache; survives `compose down` so re-solves are instant |
+| source tarballs → `/cache/src` | named volume | avoids re-downloading PETSc/Trilinos on every iteration |
+| `dist/` | bind mount | few large files; you want the tarball visible from macOS |
+
+The two cache volumes are the main quality-of-life win: after the first run, iterating
+on `relocate/` or `test/` costs no network at all.
+
+**Architecture.** Both `linux/arm64` and `linux/amd64` are worth having, via a
+`PLATFORM` variable:
+- **arm64 is native and first-class** — the plan already targets `linux-aarch64`, so
+  this is not emulation-for-convenience, it is the real second target being developed
+  on real hardware. Fast.
+- **amd64 runs under Rosetta** (enable Docker Desktop's Rosetta option; QEMU otherwise
+  and it is much slower). Needed for the primary target and unavoidable for
+  `BLAS_PROVIDER=mkl`, which is x86-only.
+
+**Practical notes:** raise Docker Desktop's memory and disk allocation — the default
+disk is not enough for a ~2 GB env plus PETSc/Trilinos build trees plus the package
+cache, and Trilinos linking is memory-hungry. Expect the full `make all` to run long
+enough that `shell` plus incremental `make` is the real workflow, not `compose up`.
+
+- **Verify:** `BASE_IMAGE=almalinux:9 docker compose run --rm build make conda`
+  succeeds on both platforms; `compose down && compose up` re-solves from cache with
+  no network; `verify` on a different base image than `build` passes `distcheck`.
+
 ### S1 — Conda bootstrap
 No longer a spike — the harvest step that made it one is gone.
 - `conda/bootstrap.sh`: fetch `Miniforge3-Linux-$(uname -m).sh`, install with
@@ -462,9 +524,13 @@ time is not worth it when a later normalization pass exists.
 ### S7 — CI matrix (follow-on, deliberately loose)
 A GitHub Actions matrix over minimal base images — a couple of AlmaLinux variants,
 openSUSE Leap, and two Ubuntu LTS — running the same `make all distcheck` in a
-container with no dev packages installed. The point is not to build the stack on each
+container with no dev packages installed. **Reuses S0b's `docker/` directory
+directly**: same `Dockerfile.builder`/`Dockerfile.verify`, same `bases.env` matrix
+list, so a green local `compose run verify` means something about CI rather than being
+a parallel implementation that drifts. The point is not to build the stack on each
 distro; it is to **build once and validate the same tarball everywhere**, so the split
-is a build job publishing an artifact plus a fan-out of consume-and-test jobs. A
+is a build job publishing an artifact plus a fan-out of consume-and-test jobs — which
+is exactly S0b's `build`/`verify` service split, scaled out. A
 second axis over `GLIBC_FLOOR ∈ {2.17, 2.28}`, `BLAS_PROVIDER ∈ {openblas, mkl}`, and
 `MPI_FAMILY ∈ {mpich, openmpi}` — the last of which is where OpenMPI's container
 launch quirks will surface, so it wants real images rather than a local check.
