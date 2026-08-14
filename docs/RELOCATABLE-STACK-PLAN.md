@@ -293,6 +293,11 @@ unknowns — timebox these first.
   the package-discovery glob working.
 - **Verify:** `make -n all` prints a sensible ordered plan; `make help` lists targets.
 
+**Done.** The tag exists and is pushed; the autotools tree is gone; the stage
+graph now encodes the seven-step order and `make -n all` prints it once, in
+order, holding under `-j8`. See the amendments section for what the review of
+this plan turned up.
+
 ### S0b — Local container dev loop (Docker Compose)
 Lands immediately after the scaffold, because it is the environment everything else is
 developed in. Primary driver: developing on an Apple Silicon Mac, where the build must
@@ -604,3 +609,107 @@ Spot checks worth doing by hand at least once:
    `PMIX_PREFIX` handling in `activate.sh`, wrapper-data text fixup, a much larger
    dlopen surface (MCA components plus the ucx/ucc/libfabric/pmix stack), a different
    ABI, and container launch quirks. Sequence it after MPICH is green end to end.
+
+---
+
+## Amendments (review, 2026-08)
+
+This plan was reviewed against the repo as scaffolded, against the v0 tree it
+supersedes, and — where it makes factual claims about conda-forge — against
+conda-forge itself. The design held; these are corrections. Each is fixed in the
+commit that closes it, and this section records the correction so the plan above
+does not have to be read alongside a separate errata list.
+
+### Fixed in S0
+
+**A1 — `make all` skipped the gate.** `all` resolved to `dist`, and `dist`
+depended only on `relocate.stamp`, so the default workflow ran conda → build →
+relocate → dist and skipped `test`, `validate` and `slim` entirely. `validate`
+depended on the validate.sh *file* rather than on `relocate.stamp`, and `slim`
+had no stamp at all. The seven-step order in §Verification was documented but
+not encoded. Now a real dependency graph, with one stamp per gate *position*
+(`test-built`, `validate-relocated`, `test-relocated`, `validate-slimmed`) and
+phony `test`/`validate` entry points that always re-run.
+
+**A2 — contract gaps.** `PKG_STAGE` was in the §S6 `pkg.mk` contract but
+unimplemented; it now selects `build` (default) vs `optional`. `MAKE_J_L` and
+`TARGET_PLATFORM` were missing from `PKG_ENV`. `list_build_env` had no
+successor. Four of the twelve hook stages had no directory. `make shell` was
+`.PHONY` with no rule.
+
+### Open — to be closed in the conda & packaging infrastructure PR
+
+**A3 — a bare `hdf5` spec selects the *serial* build.** Verified against
+conda-forge: `hdf5` ships `nompi_*`, `mpi_mpich_*`, `mpi_openmpi_*` and
+`mpi_mvapich_*` variants, and conda-forge deliberately gives `nompi` a **+100
+build-number offset** (`nompi_hf95b8e7_110` against `mpi_mpich_he5038ac_10`), so
+an unqualified request wins with serial HDF5 and PETSc/libMesh silently lose
+parallel I/O. §S1's env spec must read `hdf5=1.14.*=mpi_${MPI_FAMILY}_*`. The
+version pin is not optional either — hdf5 2.1.0 and 2.2.0 are now on
+conda-forge and post-date the pinned PETSc and libMesh. This belongs on the list
+of measured traps alongside the `libblas`/`liblapack` and `mpich-mpi*` ones.
+
+**A4 — the shipped glibc floor is not the one we pin.** `GLIBC_FLOOR` pins
+`sysroot_*`, which constrains only *our* compilations. Every prebuilt
+conda-forge binary in the tree — mpich, openblas, libgcc, hwloc, ucx — carries
+conda-forge's own baseline, so the effective floor is the max of the two and
+`2.17` is not deliverable from conda binaries regardless of the pin. Validator
+rule 4 must **measure** the maximum required `GLIBC_x.y` across the tree, fail
+if it exceeds `GLIBC_FLOOR`, and record the measured value in
+`stack-manifest.json`. §Locked decisions' "`2.17` supported" is downgraded to
+aspirational until proven.
+
+**A5 — `grep -rI "$(BUILD_ROOT)"` cannot catch the failure that matters.** `-I`
+means *ignore binary files*, so a build-root path baked into an ELF — precisely
+what breaks relocation — is invisible to it. Used as §S4's success criterion and
+again in §Verification's spot checks. Must scan binaries, with a narrow and
+justified allowlist.
+
+**A6 — conda's padded-binary prefix rewriting is one-way.** `conda-meta` marks
+each embedded-prefix file `text` or `binary`; padded binary slots can be
+rewritten only to an equal-or-shorter path with NUL padding, never lengthened.
+The plan leans on that inventory as its primary fixup mechanism without saying
+so. Two consequences: RPATH is the runtime-critical case and `patchelf` owns it,
+so the remaining padded slots must be shown to be non-critical; and the build
+should happen at a deliberately **long** `BUILD_ROOT` so shortening is always
+available. `/build` in `docker/compose.yaml` is short.
+
+**A7 — the validator needs tools the tarball will not have.** `validate.sh`
+needs `readelf`/`objdump` (binutils is on `prune.list`) and `depsolve.py` needs
+python (pruned when `SHIP_PYTHON=no`), while `Dockerfile.verify` installs only
+`tar`. So full validation cannot run where §S0b implies it does — and the
+compose `verify` service currently runs neither `validate.sh` nor
+`test/distcheck.sh`. Split into `--full` (builder image, against the untarred
+tree — this is `distcheck`'s job) and `--runtime` (loader-only, what the
+pristine verify image can actually run).
+
+**A8 — `test/run.sh` ignores `MODE`.** It always compiles first, which
+contradicts §S3's "run the prebuilt binary first" — the guarantee that matters —
+and is impossible in the verify image, which has no compiler. It also does not
+export the `LIBMESH_DIR`/`PETSC_DIR`/`MPIEXEC` its own contract declares, and
+writes build output into `test/smoke/`, which compose mounts read-only.
+
+**A9 — no placeholder smoke test.** §S3 calls for one so the pipeline is
+exercisable; without it `make test` cannot run at all, and nothing downstream of
+it can be proven. Staged: MPI-only first, then PETSc, then libMesh, culminating
+in `introduction_ex4`.
+
+**A10 — `prune.sh` can delete source-installed files.** It removes conda
+packages by their `conda-meta` file lists, so a source package that overwrote a
+conda-owned file loses it when that package is pruned. Relatedly, once source
+packages live in `$STACK`, further `conda` operations on that prefix are unsafe.
+Needs a stated "sealed after `make conda`" rule and a validator check for
+conda/source file-ownership collisions.
+
+### Open — to be closed in the source-compiles PR
+
+**A11 — Trilinos' PETSc dependency is spurious.** In the v0 tree it existed only
+to scavenge `${PETSC_DIR}/lib/libfblas.a`. With BLAS from conda, `PKG_DEPS` for
+trilinos is empty — which is what actually unlocks the concurrency §S2 promises:
+petsc and trilinos build in parallel, then libmesh.
+
+**A12 — `-DTrilinos_ENABLE_Kokkos=OFF` may not survive the pinned version.**
+Kokkos became a mandatory dependency of Sacado in later Trilinos. The pins stay
+at 14-4-0 for now, so this is the first thing to test when the Trilinos recipe
+lands; the fallback is to bump Trilinos alone. `-DTPL_ENABLE_DLlib=OFF` was a
+static-era flag and must flip to `ON`.
