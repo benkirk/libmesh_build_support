@@ -28,6 +28,19 @@ fi
 export CONDARC="${CONDA_HOME}/condarc"
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-${CONDA_HOME}/pkgs}"
 
+# The build root can outlive a change of TARGET_PLATFORM -- in the container it
+# is a named volume that persists across runs, so switching between linux-64 and
+# linux-aarch64 leaves a miniforge for the wrong architecture in place.  The
+# symptom is 'Error 126' from make, which says nothing useful.  Detect it and
+# rebuild instead: .conda is a throwaway toolchain root, so this costs a
+# download, not any real work.
+if [ -x "${CONDA_HOME}/bin/conda" ] && \
+   [ "$(cat "${CONDA_HOME}/.arch" 2>/dev/null)" != "${arch}" ]; then
+  echo "miniforge in ${CONDA_HOME} is for $(cat "${CONDA_HOME}/.arch" 2>/dev/null || echo 'an unknown arch'), need ${arch}"
+  echo "removing and reinstalling (it is a throwaway toolchain root)"
+  rm -rf "${CONDA_HOME}"
+fi
+
 if [ ! -x "${CONDA_HOME}/bin/conda" ]; then
   echo "installing miniforge into ${CONDA_HOME}"
   mkdir -p "$(dirname "${CONDA_HOME}")"
@@ -36,6 +49,7 @@ if [ ! -x "${CONDA_HOME}/bin/conda" ]; then
   url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${arch}.sh"
   curl -fsSL -o "${tmp}/miniforge.sh" "${url}"
   bash "${tmp}/miniforge.sh" -b -f -p "${CONDA_HOME}"
+  echo "${arch}" > "${CONDA_HOME}/.arch"
 fi
 
 mkdir -p "${CONDA_HOME}"

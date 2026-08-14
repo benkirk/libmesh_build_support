@@ -101,6 +101,23 @@ itself, which is yours to provide.
 
 Do not re-discover these.
 
+- **The aarch64 floor is `armv8.1-a`, not `armv8-a`, and that is not a
+  preference.** conda-forge's aarch64 toolchain emits LSE atomics *inline and
+  unguarded* in `libstdc++`, `libgcc_s`, `libgfortran`, `libcurl`, `libfabric`,
+  `libucs` and others — no `__aarch64_have_lse_atomics`, no outline-atomic
+  helpers. Those are binaries we do not build. Excludes Cortex-A72/A53/A57.
+- **`-march` is last-wins, `CFLAGS` are injected first.** So conda-forge's
+  `-march=nocona` on x86-64 cannot override a build system that appends its own
+  `-march`. That is why the compiler-wrapper layer appends the baseline *last*,
+  and why `relocate/isa-scan.py` checks the artifact regardless.
+- **Switching `TARGET_PLATFORM` against an existing build root** used to fail
+  with a bare `Error 126`: the named volume kept a miniforge for the other
+  architecture. `conda/bootstrap.sh` now detects and reinstalls.
+- **`docker compose run` silently reuses the last-built image.** Pass `--build`
+  when changing `BASE_IMAGE`/`VERIFY_IMAGE`, or you get a green run against the
+  wrong distro. The verify service prints the distro and glibc it actually ran
+  on — check that line.
+
 - **Never request the bare `libblas`/`liblapack` metapackages.** They drag in
   ~560 MB of MKL alongside the openblas actually selected. Use `libopenblas`
   plus `blas=*=openblas`.
