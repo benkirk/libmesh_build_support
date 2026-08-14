@@ -46,7 +46,7 @@ replaces the top level.
 | MPI scope | **Requirement:** the bundled MPI runs N ranks on a single node. Multi-node via a customer's own ABI-compatible MPI is a **deferred follow-on**, not sprint scope — we only avoid choices that would foreclose it. |
 | From source | PETSc, libMesh, Trilinos, customer packages. Source MPI stays as an opt-in override. |
 | glibc floor | A knob. Default `sysroot=2.28`; `2.17` supported. |
-| conda env | **Does not ship.** Build-time only; needed content is harvested into `stack/`. |
+| conda env | **The env is the prefix.** `conda create -p $(BUILD_ROOT)/stack`; source packages install into that same prefix. Build-only packages (compilers, cmake, ninja, sysroot) are *pruned* before packing — compiler **runtime** stays. No harvest/copy step. |
 | Validator gate | Only core glibc may resolve outside the tree. `libstdc++.so.6` / `libgcc_s.so.1` **must** resolve inside it. |
 | Platforms | `linux-64` and `linux-aarch64`. (macOS explicitly out of scope.) |
 | Consumer mode | Template for extension — customers build packages against the stack, so compile capability is retained through the build and is a slim-profile choice at the end. |
@@ -72,7 +72,8 @@ pkgs/mpich/{pkg.mk,build.sh}        opt-in source MPI
 pkgs/_template/{pkg.mk,build.sh}    ← the extension point (successor to utils/build_template.sh)
 site/                     gitignored; customer package dirs, auto-discovered
 hooks/{pre,post}-<stage>/ run-parts style injection points
-relocate/harvest.sh  depsolve.py  patchelf.sh  fixup-text.sh  slim.sh  validate.sh
+conda/prune.list          conda packages dropped from the redistributable
+relocate/depsolve.py  patchelf.sh  fixup-text.sh  prune.sh  slim.sh  validate.sh
 stack/activate.sh.in      template for the shipped activation script
 test/smoke/               owner-provided libMesh example lands here
 test/run.sh               harness, MODE = inplace | relocated
@@ -84,14 +85,18 @@ ARCHIVE.md  README.md
 
 ```
 $(BUILD_ROOT)/
-  .toolchain/     miniforge + build env      — BUILD-TIME ONLY, never shipped
+  .conda/         miniforge installer + base — throwaway, never shipped
   .work/          sources, tmp builds, logs, stamps
-  stack/          ← the redistributable prefix; this is what gets tarred
+  stack/          ← a conda env AND the redistributable prefix; this is what gets tarred
      bin/ lib/ include/ share/ libexec/
-     lib64 -> lib          (symlinked up front so cmake/autotools land in one place)
+     conda-meta/           package manifests + embedded-prefix inventory (see below)
      etc/stack-manifest.json
      activate.sh
 ```
+
+`stack/` is created by `conda create -p $(BUILD_ROOT)/stack`, and the source-built
+packages install into that same prefix with `--prefix=$(BUILD_ROOT)/stack`. There is
+no second prefix and no copy step between them.
 
 ### `config.mk` knobs
 
@@ -104,39 +109,87 @@ BLAS_PROVIDER   ?= openblas            # openblas (OSS) | mkl (x86-64 only)
 MPI_PROVIDER    ?= conda               # conda | source
 RPATH_MODE      ?= rpath               # rpath | runpath
 SLIM_PROFILE    ?= devel               # devel | runtime
+SHIP_PYTHON     ?= no                  # keep conda's python in the redistributable?
 SMOKE_RANKS     ?= 4
 SITE_DIRS       ?= site
 ```
 
-## Key design decision: harvest early, not late
+## Key design decision: the conda env *is* the prefix
 
-The obvious reading of the requested workflow is "build against conda, then at the
-end copy conda's libraries in." That maximises the fixup surface: every
-`petscvariables`, `.pc`, `*Config.cmake`, and `mpicc` wrapper would carry paths into
-`.toolchain/`, a directory that is about to be deleted.
+An earlier revision of this plan had a **harvest** step: build against a conda env in
+`.toolchain/`, then copy the runtime content we needed into a separate `stack/` prefix
+and discard the env. That step is gone. It was the riskiest part of the design and it
+bought almost nothing. The reasoning is worth recording, because it is the single
+biggest structural decision here.
 
-Instead, **harvest runs immediately after the conda env is created**, in two passes:
+**Harvest defeated its own size argument.** A dependency closure cannot see
+`dlopen`ed libraries — MKL's dispatch (`libmkl_def`, `libmkl_avx2`, `libmkl_avx512`,
+`libmkl_vml_*`) loaded from `libmkl_core`, OpenBLAS threading layers, MPICH's
+Hydra/PMI helpers, libfabric/UCX providers, hwloc plugins. The only safe mitigation is
+to copy whole conda packages. But "copy the whole package to be safe" *is* shipping
+the package. Once dlopen forces whole-package granularity, harvest ships substantially
+the same payload as a pruned env — via several hundred lines of code that can silently
+omit something.
 
-- **`harvest-base`** — copy the declared runtime+dev content of the conda packages we
-  ship (mpich, openblas-or-mkl, hdf5, zlib, `libstdc++`/`libgcc_s`, and their
-  dependencies) into `stack/`, then path-correct the copies. Selection is by
-  **conda package file manifest** (`.toolchain/envs/build/conda-meta/*.json` has an
-  exact `files` list), not by guesswork.
-- **`harvest-closure`** — a final sweep after all source builds, catching anything a
-  later package (including a customer's) pulled in from the env.
+**Harvest's layout argument was also circular.** The merged `bin/lib/include` prefix
+that makes every RPATH a simple `$ORIGIN/../lib` is precisely what a conda env prefix
+already is. Harvest was rebuilding, by hand, a layout conda hands over for free.
 
-Everything from stage 2 onward then sees exactly one prefix, `$(STACK)`. The only
-absolute path baked anywhere is `$(BUILD_ROOT)/stack`, which is uniform and
-mechanically rewritable. The conda env is left holding only compilers, cmake, ninja,
-patchelf, python.
+**The risk profile inverts, and that is the real prize.** Harvest asks *"did I copy
+everything I need?"* — unbounded, and its failures surface on the customer's machine.
+Pruning asks *"did I delete something I need?"* — bounded, and `distcheck` already
+catches it, because the relocated smoke test runs after the prune.
 
-Selecting by package manifest also solves the problem that a `ldd` closure cannot:
-**`dlopen`ed libraries are invisible to dependency analysis.** MKL's dispatch
-(`libmkl_def`, `libmkl_avx2`, `libmkl_avx512`, `libmkl_vml_*`) is dlopened from
-`libmkl_core`; OpenBLAS threading layers, MPICH's hydra/PMI helpers, libfabric/UCX
-providers, and hwloc plugins are all the same story. Copying whole packages gets them;
-a closure walk silently drops them and the failure appears only on the customer's
-machine.
+**Conda hands us a better fixup inventory than we could build.** Each
+`conda-meta/<pkg>.json` records not only the package's exact file list but, per file,
+whether the build prefix is embedded and whether as text or as padded binary. That is
+a precise, machine-readable list of every file needing path rewriting. The earlier
+plan's `grep -r $(BUILD_ROOT)` sweep was a safety net designed *because* harvest gave
+no such inventory; it now demotes to a cheap final assertion rather than the primary
+mechanism.
+
+The cost of this choice, stated plainly: we inherit conda's full dependency closure,
+including packages nobody asked for (openssl, libcurl, ncurses and friends). That is
+more surface for the validator and more licenses to account for — though `conda-meta`
+carries per-package license metadata, making that audit easier than it would be for a
+hand-assembled set, not harder.
+
+What survives from the old design: selection and pruning are still driven by conda
+package file manifests, never by guesswork; and `relocate/depsolve.py` still exists,
+but it now only drives the aggressive slim profile instead of being load-bearing for
+correctness.
+
+### Measured, not estimated
+
+A real conda-forge solve on `linux-64` (conda 26.3.2, 2026-08), env spec as in S1:
+
+| | uncompressed |
+|---|---|
+| Full env as solved | **1.9 GB** (1828 MB by package accounting) |
+| Build-only packages (compilers, sysroot, binutils, cmake, ninja) | 861 MB |
+| After dropping build-only | 967 MB |
+| …minus the accidental MKL pull (below) | ~407 MB |
+| …minus the python stack (python, pip, icu, tk, sqlite, ncurses, readline) | **~215 MB** |
+| MKL variant: `mkl` package alone | 683 MB |
+
+So a correctly-pruned openblas redistributable lands around **200–250 MB** — which is
+what a harvest of the same runtime packages would have produced, because it is the
+same set of packages. The gigabytes are compilers, and both approaches drop them.
+**Confirms the decision: near-identical shipped size, materially lower risk.**
+
+Two findings from the measurement that are now design constraints, not observations:
+
+1. **Asking for the `libblas`/`liblapack` metapackages dragged in MKL** — 560 MB of it,
+   alongside the openblas that was actually selected. Request `libopenblas` and pin the
+   BLAS variant (`blas=*=openblas`) explicitly; never take the bare metapackages. This
+   is exactly the class of drift the checked-in lock files exist to prevent, and it is
+   only visible by measuring.
+2. **The `mpich-mpicc`/`mpicxx`/`mpifort` split packages are stale and constrained the
+   solve back to mpich 3.2.1 (2017).** Modern `mpich` builds ship the wrappers
+   themselves. Request `mpich` alone and pin a current version.
+
+Both are one-line fixes in the env spec, and both would have been invisible until a
+customer hit them.
 
 ## MPI: what is in scope, and what we merely avoid foreclosing
 
@@ -184,35 +237,41 @@ unknowns — timebox these first.
   the package-discovery glob working.
 - **Verify:** `make -n all` prints a sensible ordered plan; `make help` lists targets.
 
-### S1 — Conda bootstrap + harvest **(spike)**
+### S1 — Conda bootstrap
+No longer a spike — the harvest step that made it one is gone.
 - `conda/bootstrap.sh`: fetch `Miniforge3-Linux-$(uname -m).sh`, install with
-  `-b -f -p $(BUILD_ROOT)/.toolchain`. Isolate hermetically —
-  `CONDARC=$(BUILD_ROOT)/.toolchain/.condarc`, `CONDA_ENVS_PATH`, `CONDA_PKGS_DIRS`
-  all inside the root, `channel_priority: strict`. Never read or write `~/.condarc`.
+  `-b -f -p $(BUILD_ROOT)/.conda`. Isolate hermetically —
+  `CONDARC=$(BUILD_ROOT)/.conda/condarc`, `CONDA_PKGS_DIRS` inside the root,
+  `channel_priority: strict`. Never read or write `~/.condarc`.
+- `conda create -p $(BUILD_ROOT)/stack` — **the env is the redistributable prefix.**
+  The miniforge base in `.conda/` is only the tool that creates it and is discarded.
 - `conda/env/<platform>-<blas>.yml` → explicit `conda/lock/*.lock` checked in;
   `make conda-lock` regenerates. Locks are what CI consumes, so a conda-forge
   migration cannot silently change an artifact.
 - Env contents: `gcc_linux-64 gxx_linux-64 gfortran_linux-64
   sysroot_linux-64=$(GLIBC_FLOOR) cmake ninja make pkg-config patchelf python
-  mpich mpich-mpicc mpich-mpicxx mpich-mpifort libopenblas|mkl mkl-devel hdf5 zlib`
-  (`_linux-aarch64` variants on ARM). `BLAS_PROVIDER` is a first-class parameter on
-  every platform: `openblas` → the OSS-licensed artifact and the default;
-  `mkl` → the optimized x86-only artifact. aarch64 rejects `mkl` at config time.
+  mpich libopenblas blas=*=openblas hdf5 zlib` (`_linux-aarch64` variants on ARM).
+  Pin every version explicitly — the unpinned solve selected gcc 16.1.0.
+  Note the two measured traps above: **no bare `libblas`/`liblapack`** (drags in MKL)
+  and **no `mpich-mpi*` split packages** (pins mpich back to 3.2.1).
+  `BLAS_PROVIDER` is a first-class parameter on every platform: `openblas` → the
+  OSS-licensed artifact and the default; `mkl` → the optimized x86-only artifact,
+  selected via `blas=*=mkl`. aarch64 rejects `mkl` at config time.
+- Keep `CONDA_PKGS_DIRS` under `.conda/` — the package cache measured 2.3 GB and must
+  never land inside `stack/`.
 - `lib/activate_build_env.sh`: source the env's `etc/conda/activate.d/*.sh`
   deterministically and export `CC/CXX/FC/CONDA_BUILD_SYSROOT/CFLAGS/LDFLAGS`.
-- `relocate/harvest.sh` implementing `harvest-base` per above, plus path correction:
-  - `bin/mpicc|mpicxx|mpifort` are shell scripts with `prefix=`/`libdir=`/`includedir=`
-    at the top → rewrite to derive from `$(cd "$(dirname "$0")/.." && pwd)`. Same for
-    `h5cc`, `h5fc`, and any `*-config`.
-  - Delete every `.la` file. Libtool archives are a classic relocation landmine and
-    nothing in this stack needs them.
-  - `.pc` files → `prefix=${pcfiledir}/../..`.
-  - MPICH's Hydra: ensure a relocated `mpiexec` resolves `hydra_pmi_proxy` from
-    `stack/bin` rather than its configure-time absolute path. This is what makes the
-    single-node MPI requirement hold after relocation.
-- **Verify:** `mpiexec -n 4` runs a hello-MPI built by `$(STACK)/bin/mpicc` from a
-  shell with a scrubbed environment; no path under `$(STACK)` mentions `.toolchain`.
-- **Risks:** conda's own RPATHs are a mix of absolute and `$ORIGIN`; MKL's dlopen set;
+- `conda/prune.list`: the packages dropped before packing — `gcc_*`/`gxx_*`/
+  `gfortran_*` and their `*_impl_*` counterparts, `binutils*`, `ld_impl_*`,
+  `sysroot_*`, `kernel-headers_*`, `*-devel_linux-*`, `cmake`, `ninja`,
+  `pkg-config`, and (when `SHIP_PYTHON=no`) the python stack. **Explicitly retained:**
+  `libgcc`/`libgcc-ng`, `libstdcxx`/`libstdcxx-ng`, `libgfortran*` — the compiler
+  *runtime*, without which validator rule 3 fails by construction. This list is the
+  one place where "what ships" is decided, and it is reviewable in a diff.
+- **Verify:** the env creates; `mpiexec -n 4` runs a hello-MPI built by
+  `$(STACK)/bin/mpicc`; `du -sh $(STACK)` recorded before and after a dry-run prune so
+  the size trade is measured rather than assumed.
+- **Risks:** conda's own RPATHs are a mix of absolute and `$ORIGIN` (normalized in S4);
   Hydra's compiled-in proxy path.
 
 ### S2 — Source builds, shared, into the merged prefix
@@ -279,7 +338,7 @@ time is not worth it when a later normalization pass exists.
   returns nothing.
 - `relocate/depsolve.py`: the shared dependency resolver — parses `DT_NEEDED`,
   `DT_RPATH`/`DT_RUNPATH`, expands `$ORIGIN`, resolves against the tree. Used by both
-  `harvest-closure` and `validate.sh` so the two agree by construction.
+  `prune.sh`'s runtime profile and `validate.sh` so the two agree by construction.
 - `relocate/validate.sh` — the gate. For every ELF in `$(STACK)`, with a scrubbed
   environment (`env -i`):
   1. no unresolved (`not found`) dependencies;
@@ -300,8 +359,14 @@ time is not worth it when a later normalization pass exists.
 - **Verify:** `make relocate validate` is green, and `test/run.sh inplace` still
   passes afterward (step 5 of the requested workflow).
 
-### S5 — Slim, pack, and the relocation proof
-- `relocate/slim.sh` with two profiles:
+### S5 — Prune, slim, pack, and the relocation proof
+- `relocate/prune.sh` runs first and does the heavy lifting: remove the packages in
+  `conda/prune.list` **by their `conda-meta` file lists**, never by path globbing, so
+  removal is exactly as precise as installation was. This is where the measured
+  861 MB of compilers and build tools goes. Whole-package granularity is what keeps
+  `dlopen`ed plugins safe. It reports bytes removed per package, so the diff between
+  two builds is legible.
+- `relocate/slim.sh` then does file-level trimming, with two profiles:
   - `devel` (default): drop `.la`, `share/doc`, `share/man`, conda metadata,
     `__pycache__`, build logs, test binaries; `strip --strip-unneeded` libraries.
     **Keep** headers, `.pc`, cmake configs, compiler wrappers — customers extend this
@@ -311,8 +376,9 @@ time is not worth it when a later normalization pass exists.
     `mpiexec`, `hydra_pmi_proxy`, and the dlopen-only libraries from S1's package
     manifests must be seeded into `entrypoints` explicitly — a closure walk will not
     find them, and losing them breaks parallel launch only after relocation.
-  Slim runs **before** the final validate, and the relocated test must pass after it —
-  that ordering is what makes an aggressive slim safe to attempt.
+  Prune and slim both run **before** the final validate, and the relocated test must
+  pass after them — that ordering is what makes aggressive trimming safe to attempt,
+  and it is the whole reason pruning is a better-behaved risk than harvesting was.
 - `make dist`: reproducible tar —
   `tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@$SOURCE_DATE_EPOCH`
   → `dist/<name>-<version>-<platform>-<blas>-glibc<floor>.tar.gz`, so the OSS
@@ -326,7 +392,8 @@ time is not worth it when a later normalization pass exists.
 - `site/` auto-discovery (`SITE_DIRS ?= site`, `include $(wildcard $(SITE_DIRS)/*/pkg.mk)`)
   so customers add packages without touching tracked files.
 - `pkg.mk` contract: `PKG_NAME`, `PKG_VERSION`, `PKG_DEPS`, `PKG_URL`, `PKG_STAGE`.
-- `build.sh` contract: receives `STACK`, `WORK`, `TOOLCHAIN_ENV`, `NPROC`, `PKG_*`;
+- `build.sh` contract: receives `STACK` (which is both the conda env and the install
+  prefix — there is no second one), `WORK`, `NPROC`, `PKG_*`;
   gets `download_src` / `log` / `require` helpers — the direct descendant of today's
   `build_config.sh.in` helper block.
 - `hooks/{pre,post}-{conda,build,test,relocate,slim,dist}/` run in sorted order.
@@ -349,13 +416,13 @@ End-to-end, on a clean host:
 
 ```
 cp config.mk.example config.mk      # set BUILD_ROOT, PROFILE, GLIBC_FLOOR, BLAS_PROVIDER
-make conda                          # step 1: miniforge + env + harvest-base
+make conda                          # step 1: miniforge + create the env AS stack/
 make build                          # step 2: PETSc, libMesh, Trilinos, site/* — shared
 make test                           # step 3: smoke example, in place
-make relocate                       # step 4: harvest-closure, patchelf, text fixup
+make relocate                       # step 4: patchelf, text fixup
 make validate                       # the gate
 make test                           # step 5: in place, again, post-relocation
-make slim                           # step 6: optional
+make slim                           # step 6: prune conda build-only pkgs, then trim files
 make dist distcheck                 # step 7: tar, rm -rf, untar elsewhere, validate, test
 ```
 
@@ -369,14 +436,20 @@ Spot checks worth doing by hand at least once:
 - `$(STACK)/lib/libmpi.so.12` exists under exactly that SONAME (keeps the deferred
   external-MPI door open at zero cost).
 - `grep -rI "$(BUILD_ROOT)" $(STACK)` is empty.
+- `$(STACK)/lib/libstdc++.so.6` and `libgcc_s.so.1` still present after prune — the
+  single most likely prune mistake.
 - Untar into a path with a space in it, and into a read-only directory.
 
 ## Open risks
 
-1. **Harvest completeness** is the crux. `dlopen`ed plugins (MKL dispatch, OpenBLAS
-   threading, MPICH/hydra, libfabric/UCX providers, hwloc) are invisible to `ldd`.
-   Mitigated by harvesting whole conda packages via `conda-meta/*.json` file lists
-   rather than by closure — but this needs the S1 spike to confirm.
+1. **Prune correctness.** Now the mirror image of the old harvest risk, and much
+   better behaved: the question is "did I delete something needed?", which `distcheck`
+   answers because the relocated smoke test runs after the prune. The specific hazard
+   is deleting a compiler package and taking its *runtime* with it — `conda/prune.list`
+   must drop `gcc_impl_*` while keeping `libgcc`/`libstdcxx`/`libgfortran*`.
+   `dlopen`ed plugins (MKL dispatch, OpenBLAS threading, Hydra/PMI, hwloc) remain
+   invisible to `ldd`, so the `runtime` slim profile must never prune below
+   whole-package granularity.
 2. **conda-forge's runtime split** — `libgcc-ng`/`libstdcxx-ng` versus what the
    compiler package itself provides. Getting the *wrong* `libstdc++.so.6` into
    `stack/lib` produces a tree that works on the build host and fails elsewhere.
