@@ -1,0 +1,37 @@
+# Copy to config.mk and edit.  config.mk is gitignored.
+# Every value here is a default from mk/common.mk; uncomment to override.
+
+# Where the build root lives.  Everything the workflow generates goes here,
+# and nothing outside it is touched.  On macOS under Docker this MUST be a
+# named volume, not a bind mount -- see docker/compose.yaml.
+#BUILD_ROOT      := $(CURDIR)/_root
+
+# Package version set; see profiles/
+#PROFILE         := default
+
+#TARGET_PLATFORM := linux-64        # linux-64 | linux-aarch64
+#GLIBC_FLOOR     := 2.28            # conda sysroot pin; 2.17 for older hosts
+#GCC_VERSION     := 14              # conda-forge has 7..16; unpinned picks 16
+
+# openblas gives a fully OSS-licensed artifact and is the default.
+# mkl is x86-64 only and is rejected on linux-aarch64.
+#BLAS_PROVIDER   := openblas        # openblas | mkl
+
+#MPI_FAMILY      := mpich           # mpich | openmpi
+#MPI_PROVIDER    := conda           # conda | source
+#MPI_VERSION     := 5.0.1           # mpich 5.0.1 | openmpi 5.0.10
+
+# rpath resists a polluted LD_LIBRARY_PATH on the customer's host and is the
+# default; runpath is for debugging and for the deferred external-MPI work.
+#RPATH_MODE      := rpath           # rpath | runpath
+
+# devel keeps headers/pkgconfig/cmake so downstream packages can build against
+# the tree; runtime strips it down to what is needed to run.
+#SLIM_PROFILE    := devel           # devel | runtime
+#SHIP_PYTHON     := no
+
+#SMOKE_RANKS     := 4
+#SITE_DIRS       := site
+
+#DIST_NAME       := libmesh-stack
+#DIST_VERSION    := 0.1.0

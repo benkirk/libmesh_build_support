@@ -1,0 +1,83 @@
+# Local dev loop.  A model of the S7 CI topology, not a separate thing:
+# 'build' and 'verify' run on deliberately DIFFERENT images, and the tarball in
+# dist/ is the only artifact that crosses between them.
+#
+#   cd docker
+#   docker compose run --rm shell            # iterate
+#   docker compose run --rm build make conda
+#   docker compose run --rm verify
+#
+# On Apple Silicon: PLATFORM=linux/arm64 is native and fast, and is a real
+# target (linux-aarch64), not emulation-for-convenience.  PLATFORM=linux/amd64
+# runs under Rosetta -- enable it in Docker Desktop, QEMU is far slower -- and
+# is unavoidable for BLAS_PROVIDER=mkl, which is x86-64 only.
+
+x-common: &common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.builder
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-almalinux:9}
+  platform: ${PLATFORM:-linux/arm64}
+  working_dir: /src
+  environment:
+    BUILD_ROOT: /build
+    CONDA_PKGS_DIRS: /cache/conda-pkgs
+    SRC_CACHE: /cache/src
+    DIST_DIR: /src/dist
+    TARGET_PLATFORM: ${TARGET_PLATFORM:-linux-aarch64}
+    BLAS_PROVIDER: ${BLAS_PROVIDER:-openblas}
+    MPI_FAMILY: ${MPI_FAMILY:-mpich}
+    GLIBC_FLOOR: ${GLIBC_FLOOR:-2.28}
+    GCC_VERSION: ${GCC_VERSION:-14}
+  volumes:
+    # Repo: bind mount. Small, edited from the host, wants to be live.
+    - ..:/src
+    # BUILD_ROOT: named volume, NOT a bind mount. ~2 GB and hundreds of
+    # thousands of files -- on macOS a bind mount here is the difference
+    # between minutes and hours.
+    - build-root:/build
+    # Caches survive 'compose down', so re-solves and rebuilds cost no network.
+    - conda-pkgs:/cache/conda-pkgs
+    - src-cache:/cache/src
+
+services:
+  ## build: run the workflow
+  build:
+    <<: *common
+    command: ["make", "all"]
+
+  ## shell: interactive iteration -- the realistic day-to-day entry point,
+  ## since a full 'make all' runs far too long to sit in the foreground.
+  shell:
+    <<: *common
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  ## verify: unpack and test the tarball on a pristine, poorer image.
+  verify:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.verify
+      args:
+        BASE_IMAGE: ${VERIFY_IMAGE:-${BASE_IMAGE:-almalinux:9}}
+    platform: ${PLATFORM:-linux/arm64}
+    working_dir: /verify
+    volumes:
+      - ../dist:/dist:ro
+      - ../test:/verify/test:ro
+    command:
+      - bash
+      - -euc
+      - |
+        t=$$(ls -1 /dist/*.tar.gz 2>/dev/null | head -1)
+        [ -n "$$t" ] || { echo "no tarball in dist/ -- run 'make dist' first" >&2; exit 1; }
+        echo "unpacking $$t at a different path depth"
+        mkdir -p /verify/a/b/c && tar -xzf "$$t" -C /verify/a/b/c
+        STACK=/verify/a/b/c/stack bash /verify/test/run.sh relocated
+
+volumes:
+  build-root:
+  conda-pkgs:
+  src-cache:

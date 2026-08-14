@@ -1,0 +1,6 @@
+# The build root reaches ~2 GB; never send it as build context.
+_root/
+dist/
+.git/
+site/
+config.mk

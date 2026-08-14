@@ -1,0 +1,25 @@
+# Reference spec. The authoritative artifact is conda/lock/*.lock, regenerated
+# by 'make conda-lock'. Version pins here are templated by conda/bootstrap.sh
+# from GCC_VERSION / GLIBC_FLOOR / MPI_VERSION.
+#
+# Deliberately absent, both measured traps:
+#   libblas / liblapack  -- the bare metapackages drag in ~560 MB of MKL
+#   mpich-mpicc etc.     -- stale; pin mpich back to 3.2.1 (2017)
+name: stack
+channels: [conda-forge]
+dependencies:
+  - gcc_linux-aarch64=14
+  - gxx_linux-aarch64=14
+  - gfortran_linux-aarch64=14
+  - sysroot_linux-aarch64=2.28
+  - cmake
+  - ninja
+  - make
+  - pkg-config
+  - patchelf
+  - python
+  - mpich=5.0.1
+  - libopenblas
+  - blas=*=openblas
+  - hdf5
+  - zlib
