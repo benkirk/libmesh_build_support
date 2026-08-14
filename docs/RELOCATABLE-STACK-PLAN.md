@@ -648,7 +648,7 @@ unimplemented; it now selects `build` (default) vs `optional`. `MAKE_J_L` and
 successor. Four of the twelve hook stages had no directory. `make shell` was
 `.PHONY` with no rule.
 
-### Open — to be closed in the conda & packaging infrastructure PR
+### Closed in the conda & packaging infrastructure PR
 
 **A3 — the `hdf5` variant is decided by accident, and §S2 quietly widened its
 scope.** `hdf5` ships `nompi_*`, `mpi_mpich_*`, `mpi_openmpi_*` and
@@ -769,6 +769,72 @@ conda-owned file loses it when that package is pruned. Relatedly, once source
 packages live in `$STACK`, further `conda` operations on that prefix are unsafe.
 Needs a stated "sealed after `make conda`" rule and a validator check for
 conda/source file-ownership collisions.
+
+### Found while implementing, and now part of the design
+
+**A15 — `patchelf >= 0.18` is not installable from conda-forge.** §S4 says to use
+0.18+ "from conda", because older versions corrupt binaries when they have to
+grow the program headers. conda-forge marked **every** 0.18.0 build `broken` on
+the main label, across `linux-64`, `linux-aarch64` and `linux-ppc64le`, and
+0.19.1 never left the `patchelf_dev` label. The newest installable patchelf is
+**0.17.2** — precisely the version the plan warns about.
+
+Rather than pin something unavailable, `relocate/patchelf.sh` **measures**: it
+snapshots SONAME, `DT_NEEDED`, the interpreter, ELF type and machine for every
+object before and after the rewrite, and fails if any of them moved. patchelf is
+only ever asked to change `DT_RPATH`, so any other difference is damage — from
+this bug, a future one, or a truncated write. That is strictly stronger than the
+version pin would have been, and it is the pattern to prefer generally: an
+assertion about the artifact beats an assertion about the tool.
+
+**A16 — patchelf cannot rewrite files it has itself mapped.** In-place patching
+died with SIGSEGV/SIGBUS on exactly three files: `bin/patchelf`,
+`lib/libstdc++.so.6` and `lib/libgcc_s.so.1`. patchelf is a C++ program that
+loads the latter two *from the tree it is patching*, and its own executable
+lives there too; rewriting an `mmap`'d file earns a bus error. Those three are
+also the ones that cannot be skipped, since validator rule 3 requires the C++
+runtime to resolve in-tree.
+
+Fixed by patching a copy and `rename(2)`-ing it into place. That also closes a
+latent second bug: when the package cache shares a filesystem with the env,
+conda **hardlinks** files into the env, so in-place editing would rewrite the
+cache too and poison every future env built from it. `rename` breaks the link
+instead of following it, and is atomic, so a crash mid-patch cannot leave a
+half-written binary either.
+
+**A17 — slim must run before prune.** The plan has prune first. `strip` is
+provided only by `binutils_impl_*`, which is on `prune.list`, and the miniforge
+base has no strip either — so pruning first silently turns stripping into a
+no-op, exactly when it matters most, on the large unstripped source-built
+libraries. Trim and strip first, then prune.
+
+**A18 — the artifact ships `mpicc` but no compiler, and that is correct.**
+`prune.list` drops `gcc_impl` and the sysroot (~530 MB of the diet), so the
+shipped tarball has the MPI wrappers and nothing behind them. The relocated
+rebuild step surfaced this by failing. It is the intended shape rather than a
+defect: §Locked decisions' "consumer mode" means the supported path is building
+**inside the template, before the prune**, where the whole toolchain is present.
+A customer compiling against the shipped tarball uses their own compiler, and
+`mpicc` is still useful to them — `mpicc -show` yields the flags and MPICH
+honours `MPICH_CC`. `test/run.sh` now detects the absence and skips with that
+reason. Worth stating explicitly in `docs/EXTENDING.md`.
+
+**A19 — grepping an ELF for the build prefix produces false positives.** patchelf
+rewrites `DT_RPATH` but leaves the *old* rpath string behind in `.dynstr` as an
+unreferenced orphan. 31 objects therefore still contain the build prefix in
+their bytes while their live rpaths are perfectly relocatable. So A5's
+"scan binaries too" is right about *why* (a prefix baked into an ELF is real and
+`grep -rI` hides it) but wrong about *what to conclude*: for an ELF, the dynamic
+table governs and the bytes do not. The validator now asserts directly that
+every rpath is `$ORIGIN`-relative — the single most important property in the
+system, and one the plan never actually listed as a check — and applies the byte
+scan only to non-ELF files.
+
+**A20 — the pipeline is destructive and not re-runnable.** `relocate` and `slim`
+rewrite `$STACK` in place, so re-running them over their own output fails
+confusingly (`patchelf` has itself been pruned by then). Recovery is
+`make distclean && make all`. `relocate/patchelf.sh` now says so rather than
+leaving "patchelf not found" to be decoded.
 
 ### Open — to be closed in the source-compiles PR
 
