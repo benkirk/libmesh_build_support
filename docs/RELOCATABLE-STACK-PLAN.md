@@ -38,10 +38,11 @@ replaces the top level.
 | Decision | Choice |
 |---|---|
 | Repo | Same repo, new generation. Tag `v0-static-stack`, replace top-level layout. |
-| Toolchain | conda-forge `gcc/gxx/gfortran_linux-*` + pinned `sysroot_linux-*`. |
+| Toolchain | conda-forge `gcc/gxx/gfortran_linux-*` + pinned `sysroot_linux-*`. **`GCC_VERSION` is a knob**, default 14 — conda-forge carries 7 through 16; an unpinned solve picks 16.1.0, which is not what we want. |
 | Prefix | Single merged `stack/{bin,lib,include}` → every RPATH is `$ORIGIN/../lib`. |
 | Driver | Plain GNU Makefile + bash. No autoconf. No absolute paths baked into env scripts. |
-| From conda | build tools, MPI (mpich), BLAS/LAPACK, HDF5, zlib. |
+| From conda | build tools, MPI, BLAS/LAPACK, HDF5, zlib. |
+| MPI family | `MPI_FAMILY ∈ {mpich, openmpi}`, orthogonal to `MPI_PROVIDER ∈ {conda, source}`. MPICH is the default and the better-behaved one to relocate; OpenMPI is supported but costs real extra work (see below). |
 | BLAS/LAPACK | A build parameter on **every** platform, not just aarch64. `openblas` yields a fully OSS-licensed artifact; `mkl` yields an x86-only optimized one. Both built from the same tree; the provider is encoded in the tarball name. |
 | MPI scope | **Requirement:** the bundled MPI runs N ranks on a single node. Multi-node via a customer's own ABI-compatible MPI is a **deferred follow-on**, not sprint scope — we only avoid choices that would foreclose it. |
 | From source | PETSc, libMesh, Trilinos, customer packages. Source MPI stays as an opt-in override. |
@@ -105,8 +106,11 @@ BUILD_ROOT      ?= $(CURDIR)/_root     # step 0's new, empty directory
 PROFILE         ?= default             # profiles/*.mk — package version set
 TARGET_PLATFORM ?= linux-64            # linux-64 | linux-aarch64
 GLIBC_FLOOR     ?= 2.28                # sysroot_linux-* pin; 2.17 supported
+GCC_VERSION     ?= 14                  # conda-forge gcc_linux-*; 7..16 available, 14.4.0 current
 BLAS_PROVIDER   ?= openblas            # openblas (OSS) | mkl (x86-64 only)
+MPI_FAMILY      ?= mpich               # mpich | openmpi
 MPI_PROVIDER    ?= conda               # conda | source
+MPI_VERSION     ?= 5.0.1               # mpich 5.0.1 | openmpi 5.0.10
 RPATH_MODE      ?= rpath               # rpath | runpath
 SLIM_PROFILE    ?= devel               # devel | runtime
 SHIP_PYTHON     ?= no                  # keep conda's python in the redistributable?
@@ -214,6 +218,39 @@ scope. What keeps the door open costs nothing now and needs no extra design:
 
 Nothing in the sprint should be slowed down to accommodate the deferred case.
 
+### OpenMPI as an alternative family
+
+Supported via `MPI_FAMILY=openmpi`, but it is **not** a drop-in swap, and the default
+stays MPICH. The old repo already carried both recipes (`mpich/build.sh`,
+`openmpi/build.sh`) with a "last non-disabled wins" rule in `configure.ac`; the new
+`MPI_FAMILY` knob replaces that with an explicit choice. What actually differs:
+
+- **Relocation has a sanctioned mechanism, and we must use it.** OpenMPI reads
+  `OPAL_PREFIX` to override its compiled-in prefix; OpenMPI 5.x additionally needs
+  `PRTE_PREFIX` and `PMIX_PREFIX` for PRRTE and PMIx. `activate.sh` must set these
+  from `${BASH_SOURCE[0]}`. This is the one place the shipped env script does more than
+  set `PATH` — and unlike `LD_LIBRARY_PATH`, these are the vendor's intended interface,
+  not a workaround for a failed RPATH. Wrapper data in
+  `share/openmpi/*-wrapper-data.txt` also carries baked paths for `fixup-text.sh`.
+- **Far more dlopen surface.** OpenMPI's MCA components live in `lib/openmpi/mca_*.so`
+  and are all dlopened. Conda's `openmpi 5.0.10` additionally pulls `ucx`, `ucc`,
+  `libfabric`/`libfabric1`, `libpmix`, `libnl`, `libevent`, `libhwloc` — a fabric stack
+  with its own provider plugins, none of it visible to a dependency closure. Our
+  whole-package prune granularity already handles this correctly; it is precisely why
+  that rule is non-negotiable. Expect a materially larger artifact than MPICH.
+- **Different ABI.** OpenMPI is `libmpi.so.40` and is *not* MPICH-ABI compatible, so
+  the deferred external-MPI substitution is family-scoped: an OpenMPI-built tree can
+  only ever accept another OpenMPI.
+- **Single-node launch quirks.** `mpirun` under OpenMPI commonly needs
+  `--allow-run-as-root` in containers and may emit fabric warnings when no high-speed
+  interconnect exists. For our single-node requirement the `self`/`sm` BTLs suffice;
+  the smoke harness should pin the transport explicitly rather than let OpenMPI probe
+  and warn. This mostly shows up in the S7 CI images.
+
+Practical consequence: land MPICH end-to-end first, add OpenMPI as a second matrix
+axis once `distcheck` is green. Treat it as a variant to validate, not a parallel
+design.
+
 ## Sprint breakdown
 
 Each increment is independently verifiable. **(spike)** marks work with genuine
@@ -248,12 +285,17 @@ No longer a spike — the harvest step that made it one is gone.
 - `conda/env/<platform>-<blas>.yml` → explicit `conda/lock/*.lock` checked in;
   `make conda-lock` regenerates. Locks are what CI consumes, so a conda-forge
   migration cannot silently change an artifact.
-- Env contents: `gcc_linux-64 gxx_linux-64 gfortran_linux-64
-  sysroot_linux-64=$(GLIBC_FLOOR) cmake ninja make pkg-config patchelf python
-  mpich libopenblas blas=*=openblas hdf5 zlib` (`_linux-aarch64` variants on ARM).
-  Pin every version explicitly — the unpinned solve selected gcc 16.1.0.
+- Env contents: `gcc_linux-64=$(GCC_VERSION) gxx_linux-64=$(GCC_VERSION)
+  gfortran_linux-64=$(GCC_VERSION) sysroot_linux-64=$(GLIBC_FLOOR)
+  cmake ninja make pkg-config patchelf python
+  $(MPI_FAMILY)=$(MPI_VERSION) libopenblas blas=*=openblas hdf5 zlib`
+  (`_linux-aarch64` variants on ARM). Pin every version explicitly — the unpinned
+  solve selected gcc 16.1.0. conda-forge carries gcc 7 through 16; **14.4.0** is the
+  current 14.x and the intended default.
   Note the two measured traps above: **no bare `libblas`/`liblapack`** (drags in MKL)
-  and **no `mpich-mpi*` split packages** (pins mpich back to 3.2.1).
+  and **no `mpich-mpi*` split packages** — those are stale and pin mpich back to
+  3.2.1 when current mpich is **5.0.1**. Modern builds ship the wrappers in the main
+  package. OpenMPI's current release is **5.0.10**.
   `BLAS_PROVIDER` is a first-class parameter on every platform: `openblas` → the
   OSS-licensed artifact and the default; `mkl` → the optimized x86-only artifact,
   selected via `blas=*=mkl`. aarch64 rejects `mkl` at config time.
@@ -353,9 +395,10 @@ time is not worth it when a later normalization pass exists.
   (packages, versions, BLAS/MPI provider, glibc floor, git sha, build date).
 - `stack/activate.sh` derives its own root from `${BASH_SOURCE[0]}` — the concrete fix
   for what `utils/use_stack.sh.in` got wrong via `@abs_top_builddir@`. Sets `PATH`,
-  `PETSC_DIR`, `LIBMESH_DIR`, `TRILINOS_DIR`, `MPI_ROOT`; deliberately does **not**
-  set `LD_LIBRARY_PATH` — if it were needed, RPATH has failed and the validator
-  should have caught it.
+  `PETSC_DIR`, `LIBMESH_DIR`, `TRILINOS_DIR`, `MPI_ROOT`, and — when
+  `MPI_FAMILY=openmpi` — `OPAL_PREFIX`/`PRTE_PREFIX`/`PMIX_PREFIX`. It deliberately
+  does **not** set `LD_LIBRARY_PATH`: if that were needed, RPATH has failed and the
+  validator should have caught it.
 - **Verify:** `make relocate validate` is green, and `test/run.sh inplace` still
   passes afterward (step 5 of the requested workflow).
 
@@ -407,7 +450,9 @@ openSUSE Leap, and two Ubuntu LTS — running the same `make all distcheck` in a
 container with no dev packages installed. The point is not to build the stack on each
 distro; it is to **build once and validate the same tarball everywhere**, so the split
 is a build job publishing an artifact plus a fan-out of consume-and-test jobs. A
-second axis over `GLIBC_FLOOR ∈ {2.17, 2.28}` and `BLAS_PROVIDER ∈ {openblas, mkl}`.
+second axis over `GLIBC_FLOOR ∈ {2.17, 2.28}`, `BLAS_PROVIDER ∈ {openblas, mkl}`, and
+`MPI_FAMILY ∈ {mpich, openmpi}` — the last of which is where OpenMPI's container
+launch quirks will surface, so it wants real images rather than a local check.
 Shape this against the owner's other repo before writing it.
 
 ## Verification
@@ -460,8 +505,11 @@ Spot checks worth doing by hand at least once:
    `mpiexec -n N` inside `distcheck`. Multi-node is explicitly deferred.
 4. **C++ ABI at the seam.** Customer packages built in `site/` use our conda toolchain
    and are fine. Customer code compiled *later* with their own older `g++`, linking
-   our libraries, can hit `GLIBCXX_` mismatches. Document the supported path
-   (build inside the template) explicitly.
+   our libraries, can hit `GLIBCXX_` mismatches. `GCC_VERSION` is the lever here — a
+   lower pin narrows the gap to what customers are likely to have, at the cost of
+   newer language features. Defaulting to 14 rather than the solver's 16 is partly
+   this consideration. Document the supported path (build inside the template)
+   explicitly.
 5. **BLAS provider as a product axis.** Licensing is settled (MKL redistribution is
    acceptable to the owner), so the remaining risk is mechanical: `openblas` and `mkl`
    must be genuinely interchangeable at the `config.mk` level, produce distinctly
@@ -471,3 +519,7 @@ Spot checks worth doing by hand at least once:
 6. **PETSc `--download-*` under shared.** Several of these have historically been
    shaky about honouring shared builds — the `3.17*`/ML case already in the tree is
    the precedent. Expect per-version special-casing to survive into the new recipe.
+7. **OpenMPI is a heavier variant, not a swap.** `OPAL_PREFIX`/`PRTE_PREFIX`/
+   `PMIX_PREFIX` handling in `activate.sh`, wrapper-data text fixup, a much larger
+   dlopen surface (MCA components plus the ucx/ucc/libfabric/pmix stack), a different
+   ABI, and container launch quirks. Sequence it after MPICH is green end to end.
