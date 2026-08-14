@@ -33,10 +33,14 @@ define do_test
 	$(call run_hooks,post-test)
 endef
 
+# $(1) is the stage label AND the validate stage: 'relocated' reports embedded
+# prefix residue, 'final' treats it as fatal.  See relocate/validate.sh.
 define do_validate
 	$(SAY) VALIDATE '$(1)'
 	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
-	  bash relocate/validate.sh --full '$(STACK)'
+	  GCC_VERSION='$(GCC_VERSION)' MPI_PROVIDER='$(MPI_PROVIDER)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' SLIM_PROFILE='$(SLIM_PROFILE)' \
+	  bash relocate/validate.sh --full --stage '$(1)' '$(STACK)'
 endef
 
 #-------------------------------------------------------------------------------
@@ -96,11 +100,11 @@ $(STAMPS)/relocate.stamp: $(STAMPS)/test-built.stamp \
 #-------------------------------------------------------------------------------
 ## validate: the gate -- no unexpected host dependencies, C++ runtime in-tree
 validate: $(STAMPS)/relocate.stamp relocate/validate.sh
-	$(call do_validate,$(STACK))
+	$(call do_validate,relocated)
 
 # the gate, immediately after relocation
 $(STAMPS)/validate-relocated.stamp: $(STAMPS)/relocate.stamp relocate/validate.sh | $(STAMPS)
-	$(call do_validate,post-relocate)
+	$(call do_validate,relocated)
 	$(Q)touch $@
 
 # step 5: in place again, proving relocation did not break the build tree
@@ -125,7 +129,7 @@ $(STAMPS)/slim.stamp: $(STAMPS)/test-relocated.stamp \
 # the gate again, after pruning -- this is the one that catches a prune that
 # took libstdc++.so.6 or libgcc_s.so.1 with it
 $(STAMPS)/validate-slimmed.stamp: $(STAMPS)/slim.stamp relocate/validate.sh | $(STAMPS)
-	$(call do_validate,post-slim)
+	$(call do_validate,final)
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------

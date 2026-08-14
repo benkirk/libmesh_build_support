@@ -75,7 +75,15 @@ else
     "gxx_${ctag}=${GCC_VERSION}"
     "gfortran_${ctag}=${GCC_VERSION}"
     "sysroot_${ctag}=${GLIBC_FLOOR}"
-    cmake ninja make pkg-config patchelf python
+    cmake ninja make pkg-config python
+    #  - patchelf is deliberately NOT pinned >= 0.18, despite that being the
+    #    version that fixes program-header-growth corruption: conda-forge
+    #    marked every 0.18.0 build 'broken' on main across all Linux subdirs,
+    #    and 0.19.1 never left the 'patchelf_dev' label.  0.17.2 is the newest
+    #    installable one.  relocate/patchelf.sh compensates by verifying that
+    #    nothing but the RPATH changed, which is a stronger check than the
+    #    version pin would have been.  See amendment A15.
+    patchelf
   )
   case "${BLAS_PROVIDER}" in
     openblas) specs+=( libopenblas "blas=*=openblas" ) ;;

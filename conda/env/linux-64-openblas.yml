@@ -21,7 +21,7 @@ dependencies:
   - ninja
   - make
   - pkg-config
-  - patchelf
+  - patchelf   # see A15: conda-forge has no installable 0.18+
   - python
   - git
   - mpich=5.0.1

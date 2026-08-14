@@ -1,0 +1,57 @@
+# shellcheck shell=bash
+# Activation script for the relocatable stack.  Installed as $STACK/activate.sh.
+#
+#   . /wherever/you/unpacked/stack/activate.sh
+#
+# It derives its own root from $BASH_SOURCE and never from a path baked in at
+# build time.  That is the concrete fix for what the v0 utils/use_stack.sh got
+# wrong: it interpolated @abs_top_builddir@, so the "installed" script only ever
+# worked on the machine that built it -- the exact opposite of relocatable.
+#
+# It deliberately does NOT set LD_LIBRARY_PATH.  Every object in this tree
+# carries an $ORIGIN-relative RPATH, so the loader finds its own libraries with
+# no help.  If LD_LIBRARY_PATH were needed here, RPATH would have failed and
+# relocate/validate.sh should have caught it -- setting it would hide the bug
+# and, worse, would leak our libraries into unrelated processes.
+
+# Resolve our own directory, following symlinks, without assuming the caller's
+# cwd.  Works when sourced from bash or zsh.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  __stack_src="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  __stack_src="${(%):-%x}"
+else
+  echo "activate.sh: source me from bash or zsh" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+STACK_ROOT="$(cd "$(dirname "$(readlink -f "${__stack_src}" 2>/dev/null || echo "${__stack_src}")")" && pwd)"
+unset __stack_src
+export STACK_ROOT
+
+export PATH="${STACK_ROOT}/bin:${PATH}"
+
+# Package roots, for build systems that look them up by convention.  These are
+# all the same directory: the merged prefix is the point.
+export PETSC_DIR="${STACK_ROOT}"
+export LIBMESH_DIR="${STACK_ROOT}"
+export TRILINOS_DIR="${STACK_ROOT}"
+export MPI_ROOT="${STACK_ROOT}"
+export HDF5_ROOT="${STACK_ROOT}"
+
+export PKG_CONFIG_PATH="${STACK_ROOT}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+export CMAKE_PREFIX_PATH="${STACK_ROOT}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+
+# OpenMPI reads its own prefix from the environment; this is the vendor's
+# intended relocation interface, not a workaround for a failed RPATH.  OpenMPI
+# 5.x needs PRTE and PMIx told separately.  Harmless when MPI_FAMILY=mpich,
+# which finds hydra_pmi_proxy via PATH.
+if [ -x "${STACK_ROOT}/bin/ompi_info" ]; then
+  export OPAL_PREFIX="${STACK_ROOT}"
+  export PRTE_PREFIX="${STACK_ROOT}"
+  export PMIX_PREFIX="${STACK_ROOT}"
+fi
+
+if [ -z "${STACK_QUIET:-}" ]; then
+  echo "stack: ${STACK_ROOT}"
+fi

@@ -1,15 +1,248 @@
 #!/usr/bin/env bash
-# relocate/validate.sh -- NOT YET IMPLEMENTED (sprint item S4/S5).
-# See docs/RELOCATABLE-STACK-PLAN.md for the specified behaviour.
+# relocate/validate.sh -- the gate.
+#
+#   validate.sh [--full|--runtime] [--stage relocated|final] [ROOT]
+#
+# Two modes, because the checks need different tools and the two places we run
+# them have different tools available:
+#
+#   --full     the complete set.  Needs a Python interpreter for depsolve.py.
+#              Uses $CONDA_HOME/bin/python -- the miniforge base, which lives
+#              OUTSIDE the stack, is never pruned and is never shipped.  That
+#              matters: binutils and the stack's own python are both on
+#              prune.list, so a validator depending on either would stop
+#              working exactly when the post-slim gate needs it.
+#
+#   --runtime  loader-only.  No python, no binutils -- just ld.so answering
+#              "can you resolve this?".  This is what the pristine verify image
+#              can run, and it is the check that most directly mimics what
+#              happens on the customer's machine.
+#
+# Two stages, because the tree is not final until after slim:
+#
+#   --stage relocated   embedded-prefix residue is REPORTED.  Most of it lives
+#                       in packages prune.list removes (the sysroot alone is
+#                       ~350 files), so failing here would mean failing on
+#                       files that are about to be deleted.
+#   --stage final       residue is FATAL.  This is the artifact.
 set -euo pipefail
-echo "relocate/validate.sh: not implemented yet (see docs/RELOCATABLE-STACK-PLAN.md)" >&2
-exit 1
 
-# S4, specified -- this is the gate.  For every ELF under $STACK, env -i:
-#   1. no unresolved ("not found") dependencies
-#   2. anything resolving outside $STACK must be in the core allowlist:
-#      libc libm libdl libpthread librt libutil libresolv ld-linux linux-vdso
-#   3. libstdc++.so.6 and libgcc_s.so.1 MUST resolve inside $STACK
-#   4. required GLIBC_/GLIBCXX_/CXXABI_ symbol versions within GLIBC_FLOOR
-#   5. no absolute $BUILD_ROOT strings in text files; no .la; no dangling symlinks
-# Emits a report, a non-zero exit, and stack/etc/stack-manifest.json.
+MODE=full
+STAGE=relocated
+ROOT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --full)    MODE=full ;;
+    --runtime) MODE=runtime ;;
+    --stage)   STAGE="$2"; shift ;;
+    --stage=*) STAGE="${1#*=}" ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *)  ROOT="$1" ;;
+  esac
+  shift
+done
+
+ROOT="${ROOT:-${STACK:-}}"
+: "${ROOT:?usage: validate.sh [--full|--runtime] [--stage S] ROOT}"
+ROOT="$(cd "${ROOT}" && pwd)"
+GLIBC_FLOOR="${GLIBC_FLOOR:-2.28}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+fails=0
+warns=0
+bad  () { echo "  FAIL  $*"; fails=$((fails + 1)); }
+warn () { echo "  warn  $*"; warns=$((warns + 1)); }
+ok   () { echo "  ok    $*"; }
+
+# Stage-dependent severity.  The two gates ask genuinely different questions.
+#
+# Post-relocate, a third of the tree is about to be deleted: the sysroot, the
+# compilers, git (and its perl), tk (and its X11 dependency), libsystemd.  Their
+# unresolved references and their glibc requirements are facts about packages
+# that will not be in the artifact.  Failing on them there would mean failing on
+# files we are about to remove -- which trains you to ignore the gate, and a
+# gate you ignore is not a gate.
+#
+# So: checks whose verdict CANNOT improve by deleting things (integrity, the C++
+# runtime resolving in-tree, dangling symlinks, path length) are fatal at both
+# stages.  Checks that are properties of the final dependency closure are
+# advisory until the closure is final.
+soft () {
+  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$@ [advisory: pre-slim]"; fi
+}
+
+echo "=== validate (${MODE}, stage=${STAGE}) ${ROOT}"
+
+#------------------------------------------------------------------------------
+# Checks that need no tools at all, so they run in both modes.
+
+# A6: conda pads embedded-prefix binary slots to a fixed 255 bytes.  A longer
+# install path cannot be written back into them.  Measured, not assumed.
+if [ "${#ROOT}" -gt 255 ]; then
+  bad "install path is ${#ROOT} bytes; conda's padded prefix slots hold 255"
+else
+  ok "install path ${#ROOT}/255 bytes"
+fi
+
+dangling=$(find "${ROOT}" -xtype l 2>/dev/null | head -20)
+if [ -n "${dangling}" ]; then
+  bad "dangling symlinks:"; echo "${dangling}" | sed 's/^/          /'
+else
+  ok "no dangling symlinks"
+fi
+
+la=$(find "${ROOT}" -name '*.la' -type f 2>/dev/null | head -10)
+if [ -n "${la}" ]; then
+  bad "libtool .la files present (they carry absolute paths):"
+  echo "${la}" | sed 's/^/          /'
+else
+  ok "no .la files"
+fi
+
+#------------------------------------------------------------------------------
+# Embedded build-prefix residue.
+#
+# Scans binary files too.  'grep -rI' skips them, which is exactly how a prefix
+# baked into an ELF stays invisible -- and that is the failure that breaks
+# relocation.  See amendment A5.
+if [ -n "${BUILD_ROOT:-}" ]; then
+  hits=$(LC_ALL=C grep -rla "${BUILD_ROOT}" "${ROOT}" 2>/dev/null | head -400 || true)
+  n=$(printf '%s' "${hits}" | grep -c . || true)
+  if [ "${n}" -eq 0 ]; then
+    ok "no build-prefix strings anywhere (text or binary)"
+  elif [ "${STAGE}" = final ]; then
+    bad "${n} file(s) still contain ${BUILD_ROOT}:"
+    printf '%s\n' "${hits}" | head -15 | sed "s|${ROOT}/|          |"
+  else
+    warn "${n} file(s) still contain ${BUILD_ROOT} (expected pre-slim; most are pruned)"
+  fi
+fi
+
+#------------------------------------------------------------------------------
+if [ "${MODE}" = runtime ]; then
+  # Loader-only.  Ask ld.so to resolve each object with a scrubbed environment,
+  # exactly as an unlucky customer's shell would not.
+  echo "--- loader resolution (env -i)"
+  missing=0 checked=0
+  while IFS= read -r f; do
+    [ "$(LC_ALL=C head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' ')" = "7f454c46" ] || continue
+    checked=$((checked + 1))
+    out=$(env -i LD_TRACE_LOADED_OBJECTS=1 "${f}" 2>/dev/null || true)
+    while read -r line; do
+      case "${line}" in
+        *"not found"*)
+          lib="${line%% *}"
+          case "${lib}" in
+            libcuda.so.1|libcudart.so.*|libnvidia-ml.so.1) continue ;;  # host GPU driver, by design
+          esac
+          echo "          ${f#"${ROOT}"/}: ${line}"
+          missing=$((missing + 1)) ;;
+      esac
+    done <<< "${out}"
+  done < <(find "${ROOT}/lib" "${ROOT}/bin" "${ROOT}/libexec" -type f ! -name '*.a' 2>/dev/null)
+  if [ "${missing}" -eq 0 ]; then ok "${checked} objects resolve with no environment"
+  else soft "${missing} unresolved dependency reference(s) across ${checked} objects"; fi
+
+else
+  #----------------------------------------------------------------------------
+  PY="${CONDA_HOME:-}/bin/python"
+  [ -x "${PY}" ] || PY="$(command -v python3 || true)"
+  [ -x "${PY}" ] || { echo "  FAIL  no python for depsolve.py" >&2; exit 1; }
+
+  rep="$(mktemp)"
+  trap 'rm -f "${rep}"' EXIT
+  "${PY}" "${HERE}/depsolve.py" scan --root "${ROOT}" --brief > "${rep}"
+
+  eval "$("${PY}" - "${rep}" "${GLIBC_FLOOR}" <<'PY'
+import json, sys
+rep = json.load(open(sys.argv[1]))
+floor = tuple(int(x) for x in sys.argv[2].split("."))
+meas = rep["glibc_max"]
+mt = tuple(int(x) for x in meas.split(".")) if meas else (0, 0)
+print(f"N_ELF={rep['elf_count']}")
+print(f"N_UNRES={len(rep['unresolved'])}")
+print(f"N_OPT={len(rep['optional_host'])}")
+print(f"GLIBC_MEASURED={meas or 'none'}")
+print(f"GLIBC_FILE={rep.get('glibc_max_file') or '-'}")
+print(f"GLIBC_OVER={1 if mt > floor else 0}")
+bad_internal = [m for m in rep["must_be_internal"] if not m["inside"]]
+print(f"N_EXTERNAL_CXX={len(bad_internal)}")
+print("UNRES_SAMPLE=" + json.dumps(
+    "\n".join(f"          {u['file']}: {u['lib']}" for u in rep["unresolved"][:12])))
+print("CXX_SAMPLE=" + json.dumps(
+    "\n".join(f"          {u['file']}: {u['lib']}" for u in bad_internal[:8])))
+PY
+)"
+
+  # 1. no unresolved dependencies
+  if [ "${N_UNRES}" -eq 0 ]; then ok "all ${N_ELF} ELF objects resolve within the tree + core glibc"
+  else soft "${N_UNRES} unresolved dependency reference(s):"; printf '%b\n' "${UNRES_SAMPLE}"; fi
+
+  # 2/3. the C++ runtime must come from inside the tree, never the host
+  if [ "${N_EXTERNAL_CXX}" -eq 0 ]; then ok "libstdc++/libgcc_s/libgfortran all resolve in-tree"
+  else bad "${N_EXTERNAL_CXX} reference(s) to a HOST C++ runtime:"; printf '%b\n' "${CXX_SAMPLE}"; fi
+
+  # 4. glibc floor -- measured, never assumed.  See amendment A4.
+  if [ "${GLIBC_OVER}" -eq 1 ]; then
+    soft "requires GLIBC_${GLIBC_MEASURED} but GLIBC_FLOOR is ${GLIBC_FLOOR} (worst: ${GLIBC_FILE})"
+  else
+    ok "max required GLIBC_${GLIBC_MEASURED} <= floor ${GLIBC_FLOOR}"
+  fi
+
+  [ "${N_OPT}" -eq 0 ] || warn "${N_OPT} optional host-GPU reference(s) (expected; UCX CUDA plugins)"
+
+  #----------------------------------------------------------------------------
+  # The manifest: what this artifact actually is.
+  mkdir -p "${ROOT}/etc"
+  "${PY}" - "${ROOT}" "${GLIBC_MEASURED}" "${GLIBC_FLOOR}" <<'PY'
+import glob, json, os, subprocess, sys
+root, measured, floor = sys.argv[1], sys.argv[2], sys.argv[3]
+pkgs = {}
+for j in sorted(glob.glob(os.path.join(root, "conda-meta", "*.json"))):
+    try:
+        d = json.load(open(j))
+    except (OSError, ValueError):
+        continue
+    pkgs[d.get("name", os.path.basename(j))] = {
+        "version": d.get("version"), "build": d.get("build"),
+        "license": d.get("license"),
+    }
+def sh(*a):
+    try:
+        return subprocess.run(a, capture_output=True, text=True,
+                              timeout=10).stdout.strip() or None
+    except Exception:
+        return None
+man = {
+    "generated_by": "relocate/validate.sh",
+    "build_date": os.environ.get("SOURCE_DATE_EPOCH") or sh("date", "-u", "+%Y-%m-%dT%H:%M:%SZ"),
+    "git_sha": sh("git", "-C", os.environ.get("TOPDIR", "."), "rev-parse", "HEAD"),
+    "target_platform": os.environ.get("TARGET_PLATFORM"),
+    "blas_provider": os.environ.get("BLAS_PROVIDER"),
+    "mpi_family": os.environ.get("MPI_FAMILY"),
+    "mpi_provider": os.environ.get("MPI_PROVIDER"),
+    "hdf5_parallel": os.environ.get("HDF5_PARALLEL"),
+    "rpath_mode": os.environ.get("RPATH_MODE"),
+    "slim_profile": os.environ.get("SLIM_PROFILE"),
+    # The floor we ASKED for and the floor we MEASURED.  Both, because they are
+    # not the same thing and the difference is the whole point of A4.
+    "glibc_floor_requested": floor,
+    "glibc_floor_measured": measured,
+    # GCC_VERSION pins the compiler; conda-forge ships its newest libstdc++
+    # regardless, so the runtime version is recorded separately.  See A13.
+    "gcc_version_requested": os.environ.get("GCC_VERSION"),
+    "libstdcxx_version": (pkgs.get("libstdcxx") or {}).get("version"),
+    "package_count": len(pkgs),
+    "packages": pkgs,
+}
+out = os.path.join(root, "etc", "stack-manifest.json")
+with open(out, "w") as fh:
+    json.dump(man, fh, indent=2, sort_keys=True)
+print(f"  ok    manifest -> etc/stack-manifest.json ({len(pkgs)} packages)")
+PY
+fi
+
+#------------------------------------------------------------------------------
+echo "=== validate: ${fails} failure(s), ${warns} warning(s)"
+[ "${fails}" -eq 0 ] || exit 1
