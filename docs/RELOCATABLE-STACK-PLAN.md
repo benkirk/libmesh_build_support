@@ -1,8 +1,18 @@
 # Sprint Plan: Relocatable Shared-Library Stack (v1)
 
-> **Status: design document, not yet implemented.** This is the agreed plan for the
-> next generation of `libmesh_build_support`. Nothing in the repo has changed to match
-> it yet — no archive tag, no `Makefile`, no deletions. Implementation begins at S0.
+> **Status: in progress.** This is the agreed design for the next generation of
+> `libmesh_build_support`, and it remains the source of truth. S0 and S0b are
+> done — the `v0-static-stack` tag is pushed, the autotools tree is gone, and the
+> driver and container loop are in place. Everything from `relocate` onward is
+> still a stub. A review of this plan is recorded in **Amendments** at the end;
+> read it before implementing any section, since several specifics here have been
+> corrected there.
+>
+> Two departures from the sprint order below, both deliberate:
+> **S4 lands before S2** — the relocate/validate machinery can be proven against
+> the conda env alone in a six-minute loop, instead of last and on a multi-hour
+> one. And the smoke test arrives **staged** (MPI-only → PETSc → libMesh →
+> `introduction_ex4`) so the pipeline is exercisable from the start.
 
 ## Context
 
@@ -118,6 +128,7 @@ BLAS_PROVIDER   ?= openblas            # openblas (OSS) | mkl (x86-64 only)
 MPI_FAMILY      ?= mpich               # mpich | openmpi
 MPI_PROVIDER    ?= conda               # conda | source
 MPI_VERSION     ?= 5.0.1               # mpich 5.0.1 | openmpi 5.0.10
+HDF5_PARALLEL   ?= no                  # no -> nompi_* | yes -> mpi_<family>_*  (see A3)
 RPATH_MODE      ?= rpath               # rpath | runpath
 SLIM_PROFILE    ?= devel               # devel | runtime
 SHIP_PYTHON     ?= no                  # keep conda's python in the redistributable?
@@ -292,6 +303,11 @@ unknowns — timebox these first.
 - Land `Makefile`, `mk/*.mk`, `config.mk.example` with all stage targets stubbed and
   the package-discovery glob working.
 - **Verify:** `make -n all` prints a sensible ordered plan; `make help` lists targets.
+
+**Done.** The tag exists and is pushed; the autotools tree is gone; the stage
+graph now encodes the seven-step order and `make -n all` prints it once, in
+order, holding under `-j8`. See the amendments section for what the review of
+this plan turned up.
 
 ### S0b — Local container dev loop (Docker Compose)
 Lands immediately after the scaffold, because it is the environment everything else is
@@ -604,3 +620,133 @@ Spot checks worth doing by hand at least once:
    `PMIX_PREFIX` handling in `activate.sh`, wrapper-data text fixup, a much larger
    dlopen surface (MCA components plus the ucx/ucc/libfabric/pmix stack), a different
    ABI, and container launch quirks. Sequence it after MPICH is green end to end.
+
+---
+
+## Amendments (review, 2026-08)
+
+This plan was reviewed against the repo as scaffolded, against the v0 tree it
+supersedes, and — where it makes factual claims about conda-forge — against
+conda-forge itself. The design held; these are corrections. Each is fixed in the
+commit that closes it, and this section records the correction so the plan above
+does not have to be read alongside a separate errata list.
+
+### Fixed in S0
+
+**A1 — `make all` skipped the gate.** `all` resolved to `dist`, and `dist`
+depended only on `relocate.stamp`, so the default workflow ran conda → build →
+relocate → dist and skipped `test`, `validate` and `slim` entirely. `validate`
+depended on the validate.sh *file* rather than on `relocate.stamp`, and `slim`
+had no stamp at all. The seven-step order in §Verification was documented but
+not encoded. Now a real dependency graph, with one stamp per gate *position*
+(`test-built`, `validate-relocated`, `test-relocated`, `validate-slimmed`) and
+phony `test`/`validate` entry points that always re-run.
+
+**A2 — contract gaps.** `PKG_STAGE` was in the §S6 `pkg.mk` contract but
+unimplemented; it now selects `build` (default) vs `optional`. `MAKE_J_L` and
+`TARGET_PLATFORM` were missing from `PKG_ENV`. `list_build_env` had no
+successor. Four of the twelve hook stages had no directory. `make shell` was
+`.PHONY` with no rule.
+
+### Open — to be closed in the conda & packaging infrastructure PR
+
+**A3 — the `hdf5` variant is decided by accident, and §S2 quietly widened its
+scope.** `hdf5` ships `nompi_*`, `mpi_mpich_*`, `mpi_openmpi_*` and
+`mpi_mvapich_*` variants, and the conda-forge feedstock does
+`{% set build = build + 100 %}` under the comment *"prioritize nompi via build
+number"*. So a bare `hdf5` spec resolves to the **serial** build by build-number
+luck rather than by our intent, and a future migration could flip it without
+notice.
+
+Which way it should resolve is a separate question, and the v0 tree answers it:
+`hdf5/build.sh` passed `--disable-parallel` deliberately, installed into
+`$(HDF5_VERSION)-$(COMPILER_ID)` rather than `-$(MPI_ID)`, and sat before MPI in
+`SUBDIRS` depending only on gcc and zlib. Its only consumer was **libMesh**
+(`--enable-hdf5 --with-hdf5=$HDF5_ROOT`); PETSc had no `--with-hdf5` at all and
+Trilinos had none either. §S2's `--with-hdf5-dir=$(STACK)` for PETSc is
+therefore *new scope*, not a property being preserved.
+
+**Decision: serial by default, parallel as a knob.** `HDF5_PARALLEL ?= no`
+selects `nompi_*`; `yes` selects `mpi_${MPI_FAMILY}_*`. Pinned explicitly either
+way, so the choice is ours rather than the solver's. Serial is the default
+because it matches v0, and because the `mpi_*` variant makes `libhdf5` link
+`libmpi` — which drags MPI into the closure of anything that touches HDF5, and
+closure size is the whole game here.
+
+Checked, so the knob is safe to flip: **both** variants ship `libhdf5_cpp`,
+`libhdf5_hl`, `libhdf5_hl_cpp` and the Fortran bindings — the feedstock tests
+that unconditionally — so either matches v0's `--enable-hl --enable-cxx
+--enable-fortran`. And PETSc does **not** require parallel HDF5:
+`config/packages/hdf5.py` preprocesses `H5pubconf.h` for `H5_HAVE_PARALLEL` and
+merely *defines* `PETSC_HDF5_HAVE_PARALLEL` when present, so serial configures
+cleanly and only collective I/O is given up.
+
+The version pin is not optional either: hdf5 2.1.0 and 2.2.0 are now on
+conda-forge and post-date the pinned PETSc and libMesh. Pin `hdf5=1.14.*` —
+well ahead of v0's 1.10.6, and short of a major-version API change that
+NetCDF4/Exodus have not been tested against here.
+
+**A4 — the shipped glibc floor is not the one we pin.** `GLIBC_FLOOR` pins
+`sysroot_*`, which constrains only *our* compilations. Every prebuilt
+conda-forge binary in the tree — mpich, openblas, libgcc, hwloc, ucx — carries
+conda-forge's own baseline, so the effective floor is the max of the two and
+`2.17` is not deliverable from conda binaries regardless of the pin. Validator
+rule 4 must **measure** the maximum required `GLIBC_x.y` across the tree, fail
+if it exceeds `GLIBC_FLOOR`, and record the measured value in
+`stack-manifest.json`. §Locked decisions' "`2.17` supported" is downgraded to
+aspirational until proven.
+
+**A5 — `grep -rI "$(BUILD_ROOT)"` cannot catch the failure that matters.** `-I`
+means *ignore binary files*, so a build-root path baked into an ELF — precisely
+what breaks relocation — is invisible to it. Used as §S4's success criterion and
+again in §Verification's spot checks. Must scan binaries, with a narrow and
+justified allowlist.
+
+**A6 — conda's padded-binary prefix rewriting is one-way.** `conda-meta` marks
+each embedded-prefix file `text` or `binary`; padded binary slots can be
+rewritten only to an equal-or-shorter path with NUL padding, never lengthened.
+The plan leans on that inventory as its primary fixup mechanism without saying
+so. Two consequences: RPATH is the runtime-critical case and `patchelf` owns it,
+so the remaining padded slots must be shown to be non-critical; and the build
+should happen at a deliberately **long** `BUILD_ROOT` so shortening is always
+available. `/build` in `docker/compose.yaml` is short.
+
+**A7 — the validator needs tools the tarball will not have.** `validate.sh`
+needs `readelf`/`objdump` (binutils is on `prune.list`) and `depsolve.py` needs
+python (pruned when `SHIP_PYTHON=no`), while `Dockerfile.verify` installs only
+`tar`. So full validation cannot run where §S0b implies it does — and the
+compose `verify` service currently runs neither `validate.sh` nor
+`test/distcheck.sh`. Split into `--full` (builder image, against the untarred
+tree — this is `distcheck`'s job) and `--runtime` (loader-only, what the
+pristine verify image can actually run).
+
+**A8 — `test/run.sh` ignores `MODE`.** It always compiles first, which
+contradicts §S3's "run the prebuilt binary first" — the guarantee that matters —
+and is impossible in the verify image, which has no compiler. It also does not
+export the `LIBMESH_DIR`/`PETSC_DIR`/`MPIEXEC` its own contract declares, and
+writes build output into `test/smoke/`, which compose mounts read-only.
+
+**A9 — no placeholder smoke test.** §S3 calls for one so the pipeline is
+exercisable; without it `make test` cannot run at all, and nothing downstream of
+it can be proven. Staged: MPI-only first, then PETSc, then libMesh, culminating
+in `introduction_ex4`.
+
+**A10 — `prune.sh` can delete source-installed files.** It removes conda
+packages by their `conda-meta` file lists, so a source package that overwrote a
+conda-owned file loses it when that package is pruned. Relatedly, once source
+packages live in `$STACK`, further `conda` operations on that prefix are unsafe.
+Needs a stated "sealed after `make conda`" rule and a validator check for
+conda/source file-ownership collisions.
+
+### Open — to be closed in the source-compiles PR
+
+**A11 — Trilinos' PETSc dependency is spurious.** In the v0 tree it existed only
+to scavenge `${PETSC_DIR}/lib/libfblas.a`. With BLAS from conda, `PKG_DEPS` for
+trilinos is empty — which is what actually unlocks the concurrency §S2 promises:
+petsc and trilinos build in parallel, then libmesh.
+
+**A12 — `-DTrilinos_ENABLE_Kokkos=OFF` may not survive the pinned version.**
+Kokkos became a mandatory dependency of Sacado in later Trilinos. The pins stay
+at 14-4-0 for now, so this is the first thing to test when the Trilinos recipe
+lands; the fallback is to bump Trilinos alone. `-DTPL_ENABLE_DLlib=OFF` was a
+static-era flag and must flip to `ON`.

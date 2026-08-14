@@ -30,4 +30,9 @@ PKGS :=
 $(foreach m,$(PKG_MKS),$(eval pkg_dir := $(dir $(m)))$(eval include $(m)))
 $(foreach p,$(PKGS),$(eval $(call PKG_RULE,$(p))))
 
+# PKG_STAGE splits the discovered packages into those 'make build' pulls in and
+# those that only build when named.  See docs/EXTENDING.md.
+BUILD_PKGS := $(foreach p,$(PKGS),$(if $(filter build,$(PKG_STAGE_$(p))),$(p)))
+OPT_PKGS   := $(filter-out $(BUILD_PKGS),$(PKGS))
+
 include mk/stages.mk

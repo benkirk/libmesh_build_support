@@ -17,6 +17,7 @@ PKG_NAME    := mysolver
 PKG_VERSION := 2.1.0
 PKG_URL     := https://example.com/mysolver-2.1.0.tar.gz
 PKG_DEPS    := libmesh          # other package names; conda env is implicit
+PKG_STAGE   := build            # build (default) | optional
 
 $(eval $(call declare_pkg))
 ```
@@ -27,14 +28,25 @@ the same plain `PKG_*` names without clobbering its neighbours.
 `PKG_DEPS` becomes a stamp prerequisite, so independent packages build
 concurrently under `make -jN`.
 
+`PKG_STAGE` decides whether `make build` pulls the package in. `build`, the
+default, puts it in the default graph. `optional` still gives it its own target
+(`make mysolver`) and it still gets relocated, validated and packed if it has
+been built — it just isn't built automatically. `make print-config` lists both
+sets.
+
 ## `build.sh` contract
 
-Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `BLAS_PROVIDER`,
-`MPI_FAMILY`, `RPATH_MODE`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` /
-`PKG_URL` / `PKG_DIR`.
+Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
+`TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `TOPDIR`, and
+its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` / `PKG_DIR`.
 
-Sourcing `lib/build_common.sh` gives you `activate_toolchain`, `download_src`,
-`log`, `require`, `clean_build_tmp`, and a `BUILD_TMP` scratch directory.
+Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
+which is what keeps a shared build host usable.
+
+Sourcing `lib/build_common.sh` gives you `activate_toolchain`, `list_build_env`,
+`download_src`, `log`, `require`, `clean_build_tmp`, and a `BUILD_TMP` scratch
+directory. Call `list_build_env` right after `activate_toolchain` — when a build
+fails three hours in, the log is all you have.
 
 Two rules that matter:
 
@@ -52,8 +64,11 @@ Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
 ## Hooks
 
 `hooks/<stage>/*.sh` run in sorted order with the same environment. Stages:
-`pre-conda`, `post-conda`, `post-build`, `pre-relocate`, `post-relocate`,
-`pre-slim`, `post-slim`, `post-dist`.
+`pre-conda`, `post-conda`, `pre-build`, `post-build`, `pre-test`, `post-test`,
+`pre-relocate`, `post-relocate`, `pre-slim`, `post-slim`, `pre-dist`,
+`post-dist`.
+
+`pre-build` runs once, before the first package, not once per package.
 
 Use these for site policy — extra validation, signing, publishing — rather than
 editing tracked files.

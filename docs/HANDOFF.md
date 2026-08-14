@@ -3,9 +3,9 @@
 Everything you need to pick this up on a Mac. Written after landing **S0**
 (driver scaffold) and **S0b** (container dev loop).
 
-- Design and rationale: [`docs/RELOCATABLE-STACK-PLAN.md`](docs/RELOCATABLE-STACK-PLAN.md) (arrives with PR #1)
-- This work: PR #2, branch `claude/relocatable-stack-scaffold`
-- Extending it: [`docs/EXTENDING.md`](docs/EXTENDING.md)
+- Design and rationale: [`RELOCATABLE-STACK-PLAN.md`](RELOCATABLE-STACK-PLAN.md)
+- Extending it: [`EXTENDING.md`](EXTENDING.md)
+- The retired static stack: [`../ARCHIVE.md`](../ARCHIVE.md)
 
 ## TL;DR
 
@@ -30,7 +30,6 @@ The defaults will not work.
 ```sh
 git clone https://github.com/benkirk/libmesh_build_support
 cd libmesh_build_support
-git checkout claude/relocatable-stack-scaffold
 
 cd docker
 docker compose run --rm shell        # drops you in /src with the toolchain image
@@ -119,14 +118,14 @@ In rough order:
    doc. Worth doing before S2: it can be exercised against the conda env alone,
    with no source packages built, which is a much shorter feedback loop.
 2. **S2 — the PETSc/libMesh/Trilinos recipes.** Port from the old `*/build.sh`,
-   switching to shared and installing into `$STACK`. The old recipes are still
-   in the tree for reference.
+   switching to shared and installing into `$STACK`. The old recipes are no
+   longer in the tree — read them at `git show v0-static-stack:petsc/build.sh`
+   and friends.
 3. **The smoke example** into `test/smoke/` — must be parallel-capable on one
    node and assert rank-count-dependent output, so a silently serialized run
    fails rather than passes.
-4. **The archive step**, still deliberately undone: tag `main` at `8dad908` as
-   `v0-static-stack` and delete the autotools tree. `ARCHIVE.md` is already
-   written. Held back because a tag push is outward-facing and awkward to undo.
+4. ~~**The archive step.**~~ Done: `v0-static-stack` is tagged at `8dad908` and
+   pushed, and the autotools tree is out of the working tree.
 
 ## Layout
 
