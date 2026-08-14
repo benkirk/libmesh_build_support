@@ -57,45 +57,61 @@ too long to sit in the foreground.
 
 ### 3. Which architecture
 
-Native arm64 is the fast path **and a real target** — `linux-aarch64` is a
-shipping platform, not a convenience:
+Both are verified. Native arm64 is the fast path **and a real target** —
+`linux-aarch64` is a shipping platform, not a convenience:
 
 ```sh
-PLATFORM=linux/arm64 TARGET_PLATFORM=linux-aarch64 docker compose run --rm shell
+docker compose run --rm shell bash -lc 'make all'       # native, ~15 min
 ```
 
-For the primary x86 target, or anything involving MKL (which is x86-only):
+For the primary x86 target, or anything involving MKL (x86-only), under Rosetta:
 
 ```sh
-PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64 docker compose run --rm shell
+PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64 \
+  docker compose run --rm shell bash -lc 'make all'     # Rosetta, ~1 hour
 ```
 
-> **Untested:** every verification below ran on **linux-64** in a Linux
-> container. The arm64 path has not been exercised at all. Expect the first
-> `make conda` on `linux-aarch64` to be where you find out whether the
-> conda-forge package set lines up — that is the first thing worth doing.
+Verifying the tarball on a different, poorer image:
+
+```sh
+VERIFY_IMAGE=almalinux:8  docker compose run --rm --build verify   # glibc 2.28
+VERIFY_IMAGE=ubuntu:24.04 docker compose run --rm --build verify   # glibc 2.39
+```
+
+Timing notes, since they shape how you work: the ISA scan disassembles every
+ELF and is the slowest single step (a few minutes native, much longer under
+Rosetta). The conda package cache is a named volume, so re-solves cost no
+network. `make all` is not re-runnable over its own output — `relocate` and
+`slim` rewrite `$STACK` in place and `patchelf` is itself pruned — so iterate
+with `rm -rf $BUILD_ROOT/stack $BUILD_ROOT/.work && make all`, or
+`make distclean`.
 
 ## What is verified, and what is not
 
-**Works, checked:**
+**Green end to end on BOTH platforms**, `make conda` through `make distcheck`:
 
-- `make conda` end to end. gcc pinned to **14.4.0** (an unpinned solve picks
-  16.1.0); mpich **5.0.1** exporting `libmpi.so.12`; **zero** MKL packages, so
-  the env is **1.4 G** against the 1.9 G an unpinned solve produced;
-  `mpicc`/`mpiexec`/`hydra_pmi_proxy` all present.
-- An MPI hello built with the stack's `mpicc` runs 4 ranks under `env -i` and
-  resolves everything inside the prefix except the core glibc allowlist, with
-  `libstdc++.so.6` and `libgcc_s.so.1` already in-tree.
-- Package discovery, dependency ordering, per-package targets, hooks,
-  `make help`, `make print-config`.
+| | linux-aarch64 (native) | linux-64 (Rosetta) |
+|---|---|---|
+| env as solved | 1.6 G | 1.6 G |
+| shipped tarball | **60 MB** | — |
+| ELF objects | 302 | 305 |
+| glibc floor measured | 2.25 (pin 2.28) | 2.25 (pin 2.28) |
+| ISA baseline | `armv8.1-a`, 302/302 within | `x86-64-v2`, 305/305 within |
+| CPUID-dispatching objects | 3 | 7 |
 
-**Stubs that exit non-zero** — each carries its specification in comments:
-`relocate/patchelf.sh`, `fixup-text.sh`, `validate.sh`, `prune.sh`, `slim.sh`,
-and `test/distcheck.sh`.
+`distcheck` is the claim that matters: tar, move the original **out of its
+path**, unpack at a different directory depth, validate, run 4 MPI ranks from
+there. Verified cross-distro too — built on `almalinux:9`, then unpacked and run
+on `ubuntu:24.04` (glibc 2.39) **and `almalinux:8` (glibc 2.28, the floor)**, in
+a pristine image with no python, no binutils and no compiler.
 
 **Not written yet:** the real `pkgs/petsc`, `pkgs/libmesh`, `pkgs/trilinos`
-recipes (S2), the shipped `stack/activate.sh` (S4), and the smoke example
-itself, which is yours to provide.
+recipes; the compiler-wrapper layer (spec below); and the real smoke example,
+which is yours to provide. `test/smoke/smoke.c` is the staged placeholder — MPI
+today, with the PETSc `VecCreate` already written behind a feature define.
+
+**Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`, and
+#5 (ISA baseline gate) → #4. Merge #4 first; GitHub retargets #5 automatically.
 
 ## Gotchas already paid for
 
@@ -137,21 +153,38 @@ Do not re-discover these.
 
 ## Where to pick up
 
-In rough order:
+**PR 3 — source compiles.** Three commit groups, in this order:
 
-1. **S4 — `relocate/patchelf.sh` + `validate.sh`.** The one remaining spike, and
-   the heart of the whole thing. Spec is in the stub comments and in the design
-   doc. Worth doing before S2: it can be exercised against the conda env alone,
-   with no source packages built, which is a much shorter feedback loop.
-2. **S2 — the PETSc/libMesh/Trilinos recipes.** Port from the old `*/build.sh`,
-   switching to shared and installing into `$STACK`. The old recipes are no
-   longer in the tree — read them at `git show v0-static-stack:petsc/build.sh`
-   and friends.
-3. **The smoke example** into `test/smoke/` — must be parallel-capable on one
-   node and assert rank-count-dependent output, so a silently serialized run
-   fails rather than passes.
-4. ~~**The archive step.**~~ Done: `v0-static-stack` is tagged at `8dad908` and
-   pushed, and the autotools tree is out of the working tree.
+1. **The compiler wrapper layer**, before any package uses it. Build-time only:
+   wrappers live outside the shipped tree and go on `PATH` ahead of
+   `$STACK/bin` during source builds. They append `-march=$(ISA_BASELINE)`
+   **last** — that is the entire point, since `-march` is last-wins on a gcc
+   command line and `CFLAGS` are injected first, so nothing set through the
+   environment can beat a build system that appends its own. They must also
+   hard-error on `-march=native` rather than silently correcting it.
+
+   Precedent is [NCAR/ncarcompilers](https://github.com/NCAR/ncarcompilers);
+   adapt rather than vendor — it assumes NCAR's module environment.
+
+   Traps to expect: avoid recursion (exec the real compiler by absolute path,
+   or keep the wrapper dir off `PATH` at that moment); stay silent on stdout,
+   because configure runs thousands of compile tests and parses their output;
+   pass `-v`/`--version`/`-print-*` through untouched, since PETSc introspects
+   the compiler; and do **not** wrap `mpicc` as well as `cc` — mpicc already
+   calls the wrapped `cc`, so wrapping both double-injects.
+
+2. **PETSc**, then **Trilinos** (no longer depends on PETSc — that dependency
+   existed only to scavenge `libfblas.a`, so the two build concurrently), then
+   **libMesh**. Port from `git show v0-static-stack:petsc/build.sh` and friends.
+
+3. **The smoke example** grows: PETSc `VecCreate`, then libMesh, culminating in
+   `introduction_ex4`.
+
+The ISA gate is what will tell you whether the wrapper's last-wins injection
+actually won — particularly against Kokkos, which autodetects the host
+architecture and arrives with Trilinos.
+
+**Then:** PR 4 = `site/` extension hooks and docs; PR 5 = the CI matrix.
 
 ## Layout
 
