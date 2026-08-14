@@ -15,12 +15,20 @@ MPI_VERSION     ?= 5.0.1
 HDF5_VERSION    ?= 1.14
 HDF5_PARALLEL   ?= no
 RPATH_MODE      ?= rpath
-# Instruction-set floor for the shipped binaries.  x86-64-v2 is SSE4.2+popcnt,
-# Nehalem/2009 and later -- the level RHEL 9 itself requires, so it cannot
-# exclude a host running a current distro.  armv8-a is the aarch64 baseline and
-# is universal; SVE is the hazard there.  See amendment A21.
+# Instruction-set floor for the shipped binaries.  See amendment A21.
+#
+# x86-64-v2 is SSE4.2+popcnt, Nehalem/2009 and later -- the level RHEL 9 itself
+# requires, so it cannot exclude a host running a current distro.
+#
+# armv8.1-a rather than the armv8-a baseline, because that is what we MEASURED
+# the artifact to need, not what we would prefer.  conda-forge's aarch64
+# toolchain emits LSE atomics inline and unguarded -- no __aarch64_have_lse
+# guard, no outline-atomic helpers -- in libstdc++, libgcc_s, libgfortran,
+# libcurl, libfabric, libucs and others.  Those are binaries we do not build.
+# armv8.1-a is 2016+ and covers every server part (Graviton 2+, Neoverse,
+# Ampere); it excludes Cortex-A72/A53/A57, i.e. Raspberry Pi 4 class hardware.
 ISA_BASELINE_X86     ?= x86-64-v2
-ISA_BASELINE_AARCH64 ?= armv8-a
+ISA_BASELINE_AARCH64 ?= armv8.1-a
 SLIM_PROFILE    ?= devel
 SHIP_PYTHON     ?= no
 SMOKE_RANKS     ?= 4

@@ -159,6 +159,7 @@ distcheck: dist
 	$(SAY) CHECK 'relocating to a different path depth'
 	$(Q)env $(PKG_ENV) TARBALL='$(TARBALL)' BUILD_ROOT='$(BUILD_ROOT)' \
 	  SMOKE_RANKS='$(SMOKE_RANKS)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
+	  ISA_BASELINE='$(ISA_BASELINE)' ISA_REPORT='$(WORK)/relocate/isa-scan.json' \
 	  bash test/distcheck.sh
 
 #-------------------------------------------------------------------------------

@@ -239,6 +239,15 @@ ARM = ["armv8-a", "armv8.1-a", "armv8.2-a", "armv8-a+sve"]
 levels = ARM if baseline.startswith("armv8") else X86
 DISPATCH = ("libopenblas", "libblas", "liblapack", "libmkl", "libcblas",
             "libcrypto", "libssl", "libzstd", "libz.", "libz-ng", "libgomp")
+# (library prefix, feature) pairs where the instruction is present but can never
+# execute on hardware lacking it.  Narrower than the DISPATCH list on purpose:
+# it exempts one feature of one library, not the library wholesale.
+#
+# libgcc_s carries the SVE/SME save-restore stubs required by the vector
+# procedure call standard (9 'cntd' occurrences).  They are reached only from
+# code compiled for SVE -- which cannot exist in a process running on a CPU
+# without SVE -- so they are unreachable rather than merely guarded.
+GUARDED = {("libgcc_s", "armv8-a+sve")}
 def rank(f):
     return levels.index(f) if f in levels else -1
 base = rank(baseline)
@@ -252,7 +261,9 @@ for rel, info in rep.get("files", {}).items():
     if worst is None or rank(worst) <= base:
         continue
     entry = {"file": rel, "isa": worst}
-    if os.path.basename(rel).startswith(DISPATCH):
+    bn = os.path.basename(rel)
+    if bn.startswith(DISPATCH) or any(
+            bn.startswith(lib) and worst == feat for lib, feat in GUARDED):
         dispatched.append(entry)
     else:
         over.append(entry)
@@ -319,6 +330,7 @@ man = {
     # not the same thing and the difference is the whole point of A4.
     "glibc_floor_requested": floor,
     "glibc_floor_measured": measured,
+    "isa_baseline": os.environ.get("ISA_BASELINE"),
     # GCC_VERSION pins the compiler; conda-forge ships its newest libstdc++
     # regardless, so the runtime version is recorded separately.  See A13.
     "gcc_version_requested": os.environ.get("GCC_VERSION"),

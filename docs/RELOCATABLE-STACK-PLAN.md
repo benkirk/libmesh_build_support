@@ -930,8 +930,22 @@ Both, because neither is sufficient alone.
 **`ISA_BASELINE_X86 ?= x86-64-v2`, `ISA_BASELINE_AARCH64 ?= armv8-a`.** v2 is
 SSE4.2 + popcnt, Nehalem/2009 and later — the level RHEL 9 itself requires, so
 it cannot exclude a host running a current distro, while being meaningfully
-faster than SSE2/SSE3 for numerics. `armv8-a` is universal on aarch64; SVE is
-the hazard there and is not baseline.
+faster than SSE2/SSE3 for numerics. On aarch64 the declared floor is **`armv8.1-a`, not the `armv8-a` baseline** —
+and that is a measured correction rather than a preference. The gate's first run
+on a real artifact found 13 objects above `armv8-a`: `libstdc++`, `libgcc_s`,
+`libgfortran`, `libatomic`, `libcurl`, `libfabric`, `libucs`, `libuv`, `libffi`,
+`libitm` and friends, all carrying ARMv8.1 LSE atomics. Verified they are **not**
+runtime-guarded — there is no `__aarch64_have_lse_atomics`, no
+`__aarch64_ldadd*` outline helpers, and `libstdc++` has zero undefined
+references to them, so conda-forge's aarch64 toolchain is emitting LSE inline
+with `-moutline-atomics` off. Those are binaries we do not build and cannot
+change; what was left was to declare the floor accurately. ARMv8.1 is 2016+ and
+covers every server part (Graviton 2+, Neoverse, Ampere); it excludes
+Cortex-A72/A53/A57, i.e. Raspberry Pi 4 class hardware. SVE remains a hazard and
+is not baseline.
+
+This is the gate paying for itself before it had a wrapper to check: the number
+was previously invisible, and we would have shipped it believing otherwise.
 
 **A build-time compiler wrapper layer** (S2, next PR), in the spirit of
 [NCAR's `ncarcompilers`](https://github.com/NCAR/ncarcompilers), which

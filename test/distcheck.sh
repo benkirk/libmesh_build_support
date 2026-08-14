@@ -61,6 +61,7 @@ echo
 echo "--- validate the unpacked tree (full)"
 env STACK="${NEW}" BUILD_ROOT="${BUILD_ROOT:-}" GLIBC_FLOOR="${GLIBC_FLOOR:-2.28}" \
     CONDA_HOME="${CONDA_HOME:-}" TOPDIR="${TOPDIR}" \
+    ISA_BASELINE="${ISA_BASELINE:-}" ISA_REPORT="${ISA_REPORT:-}" \
     bash "${TOPDIR}/relocate/validate.sh" --full --stage final "${NEW}"
 
 echo
