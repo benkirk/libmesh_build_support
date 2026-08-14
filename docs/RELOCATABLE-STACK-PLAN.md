@@ -128,6 +128,7 @@ BLAS_PROVIDER   ?= openblas            # openblas (OSS) | mkl (x86-64 only)
 MPI_FAMILY      ?= mpich               # mpich | openmpi
 MPI_PROVIDER    ?= conda               # conda | source
 MPI_VERSION     ?= 5.0.1               # mpich 5.0.1 | openmpi 5.0.10
+HDF5_PARALLEL   ?= no                  # no -> nompi_* | yes -> mpi_<family>_*  (see A3)
 RPATH_MODE      ?= rpath               # rpath | runpath
 SLIM_PROFILE    ?= devel               # devel | runtime
 SHIP_PYTHON     ?= no                  # keep conda's python in the redistributable?
@@ -649,15 +650,41 @@ successor. Four of the twelve hook stages had no directory. `make shell` was
 
 ### Open — to be closed in the conda & packaging infrastructure PR
 
-**A3 — a bare `hdf5` spec selects the *serial* build.** Verified against
-conda-forge: `hdf5` ships `nompi_*`, `mpi_mpich_*`, `mpi_openmpi_*` and
-`mpi_mvapich_*` variants, and conda-forge deliberately gives `nompi` a **+100
-build-number offset** (`nompi_hf95b8e7_110` against `mpi_mpich_he5038ac_10`), so
-an unqualified request wins with serial HDF5 and PETSc/libMesh silently lose
-parallel I/O. §S1's env spec must read `hdf5=1.14.*=mpi_${MPI_FAMILY}_*`. The
-version pin is not optional either — hdf5 2.1.0 and 2.2.0 are now on
-conda-forge and post-date the pinned PETSc and libMesh. This belongs on the list
-of measured traps alongside the `libblas`/`liblapack` and `mpich-mpi*` ones.
+**A3 — the `hdf5` variant is decided by accident, and §S2 quietly widened its
+scope.** `hdf5` ships `nompi_*`, `mpi_mpich_*`, `mpi_openmpi_*` and
+`mpi_mvapich_*` variants, and the conda-forge feedstock does
+`{% set build = build + 100 %}` under the comment *"prioritize nompi via build
+number"*. So a bare `hdf5` spec resolves to the **serial** build by build-number
+luck rather than by our intent, and a future migration could flip it without
+notice.
+
+Which way it should resolve is a separate question, and the v0 tree answers it:
+`hdf5/build.sh` passed `--disable-parallel` deliberately, installed into
+`$(HDF5_VERSION)-$(COMPILER_ID)` rather than `-$(MPI_ID)`, and sat before MPI in
+`SUBDIRS` depending only on gcc and zlib. Its only consumer was **libMesh**
+(`--enable-hdf5 --with-hdf5=$HDF5_ROOT`); PETSc had no `--with-hdf5` at all and
+Trilinos had none either. §S2's `--with-hdf5-dir=$(STACK)` for PETSc is
+therefore *new scope*, not a property being preserved.
+
+**Decision: serial by default, parallel as a knob.** `HDF5_PARALLEL ?= no`
+selects `nompi_*`; `yes` selects `mpi_${MPI_FAMILY}_*`. Pinned explicitly either
+way, so the choice is ours rather than the solver's. Serial is the default
+because it matches v0, and because the `mpi_*` variant makes `libhdf5` link
+`libmpi` — which drags MPI into the closure of anything that touches HDF5, and
+closure size is the whole game here.
+
+Checked, so the knob is safe to flip: **both** variants ship `libhdf5_cpp`,
+`libhdf5_hl`, `libhdf5_hl_cpp` and the Fortran bindings — the feedstock tests
+that unconditionally — so either matches v0's `--enable-hl --enable-cxx
+--enable-fortran`. And PETSc does **not** require parallel HDF5:
+`config/packages/hdf5.py` preprocesses `H5pubconf.h` for `H5_HAVE_PARALLEL` and
+merely *defines* `PETSC_HDF5_HAVE_PARALLEL` when present, so serial configures
+cleanly and only collective I/O is given up.
+
+The version pin is not optional either: hdf5 2.1.0 and 2.2.0 are now on
+conda-forge and post-date the pinned PETSc and libMesh. Pin `hdf5=1.14.*` —
+well ahead of v0's 1.10.6, and short of a major-version API change that
+NetCDF4/Exodus have not been tested against here.
 
 **A4 — the shipped glibc floor is not the one we pin.** `GLIBC_FLOOR` pins
 `sysroot_*`, which constrains only *our* compilations. Every prebuilt
