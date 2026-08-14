@@ -47,10 +47,24 @@ import sys
 X86_V4 = re.compile(
     r"%zmm|\{%k[0-7]\}|\bvpternlog|\bvpcompress|\bvpexpand|\bvpconflict|"
     r"\bvgatherpf|\bvscatter|\bvrangep|\bvreducep|\bvfpclass")
+# NOTE: 'tzcnt' is deliberately absent, and it is the interesting case.  It
+# encodes as F3 0F BC, which a pre-BMI CPU decodes as 'rep bsf' -- the REP
+# prefix is ignored and it executes correctly as plain BSF.  The two differ only
+# for a zero operand, where __builtin_ctz is undefined anyway, which is exactly
+# why gcc emits it even at -march=nocona.  It looks like a v3 instruction in
+# disassembly and is not a portability hazard.  libquadmath's 8 tzcnt were this
+# scanner's last false positive on x86-64.
+#
+# 'lzcnt' stays: it decodes as 'rep bsr' on older CPUs, which also does not
+# fault, but bsr returns the index of the highest set bit where lzcnt returns
+# the count of leading zeros -- so it is silently WRONG rather than merely
+# undefined at zero.  gcc only emits it with -mlzcnt/-mabm, so its presence is
+# a real signal.  Silent wrong answers deserve a failure at least as much as a
+# crash does.
 X86_V3 = re.compile(
     r"%ymm|\bvfmadd|\bvfmsub|\bvfnmadd|\bvfnmsub|\bvperm2i128|\bvpbroadcast|"
     r"\bbzhi\b|\bpdep\b|\bpext\b|\bmulx\b|\brorx\b|\bsarx\b|\bshlx\b|\bshrx\b|"
-    r"\bandn\b|\bblsi\b|\bblsr\b|\bblsmsk\b|\btzcnt\b|\blzcnt\b|\bmovbe\b")
+    r"\bandn\b|\bblsi\b|\bblsr\b|\bblsmsk\b|\blzcnt\b|\bmovbe\b")
 X86_V2 = re.compile(
     r"\bpopcnt\b|\bpcmpgtq\b|\bpblend|\bptest\b|\bround[ps][sd]\b|"
     r"\bpmovzx|\bpmovsx|\bcrc32\b|\bcmpxchg16b\b")
@@ -71,14 +85,26 @@ ARM_LSE = re.compile(r"\bld(add|clr|eor|set|smax|smin|umax|umin)\b|\bcas[ap]?\b|
 X86_LEVELS = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
 ARM_LEVELS = ["armv8-a", "armv8.1-a", "armv8.2-a", "armv8-a+sve"]
 
-# Libraries that dispatch on CPUID at runtime and therefore legitimately carry
-# kernels above the baseline.  Matched against the file's basename.
-RUNTIME_DISPATCH = (
-    "libopenblas", "libblas", "liblapack", "libmkl", "libcblas",
-    "libcrypto", "libssl",          # OpenSSL: AES-NI / AVX via CPUID
-    "libzstd", "libz.", "libz-ng",  # both dispatch on SSE/AVX
-    "libgomp",                      # ships multiversioned loops
-)
+# Runtime CPU-feature dispatch, DETECTED rather than listed.
+#
+# A library that selects its kernels at startup legitimately carries
+# instructions above the baseline: OpenBLAS (DYNAMIC_ARCH), MKL, OpenSSL, but
+# also -- as the first x86-64 scan showed -- libgfortran's multiversioned
+# matmul, MPICH's yaksa pack/unpack kernels, and libstdc++.  A hand-maintained
+# list of library NAMES would have to grow to cover all of those, and would
+# still be wrong for the next package someone adds.
+#
+# The mechanism leaves a signature instead.  On x86, every dispatch scheme --
+# ifunc resolvers, GCC's __builtin_cpu_supports, hand-rolled feature tests --
+# bottoms out in the CPUID instruction.  So an object containing CPUID is
+# reported as dispatching rather than as a hazard.
+#
+# This is a heuristic and is treated as one: such objects are reported in their
+# own bucket rather than silently passed, so a library that has CPUID for some
+# unrelated reason AND genuinely unguarded AVX-512 still shows up to be looked
+# at.  It is much better than a name list, and it generalises to packages we
+# have not written yet.
+CPUID = re.compile(r"\bcpuid\b")
 
 
 EM_X86_64, EM_AARCH64 = 62, 183
@@ -135,6 +161,7 @@ def scan_one(args):
     text = instructions(out.stdout)
 
     found = []
+    dispatch = bool(CPUID.search(text)) if machine == EM_X86_64 else False
     if machine == EM_X86_64:
         if X86_V4.search(text):
             found.append("x86-64-v4")
@@ -149,7 +176,7 @@ def scan_one(args):
             found.append("armv8.2-a")
         if ARM_LSE.search(text):
             found.append("armv8.1-a")
-    return rel, {"features": sorted(found)}
+    return rel, {"features": sorted(found), "cpuid_dispatch": dispatch}
 
 
 def highest(features, levels):
@@ -177,6 +204,8 @@ SELF_TEST = [
     ("  401190:\tpcmpgtq %xmm1,%xmm0", "x86-64-v2"),
     ("  4011a0:\taddsd  %xmm1,%xmm0", None),
     ("  4011b0:\tmovaps %xmm0,(%rax)", None),
+    # tzcnt is 'rep bsf' on pre-BMI hardware: executes correctly, not a hazard
+    ("  4011b8:\ttzcnt  %rcx,%rdx", None),
     ("  4011c0:\tld1w   {z0.s},p0/z,[x0]", "armv8-a+sve"),
     ("  4011d0:\tptrue  p0.d", "armv8-a+sve"),
     ("  4011e0:\tsdot   v0.4s,v1.16b,v2.16b", "armv8.2-a"),

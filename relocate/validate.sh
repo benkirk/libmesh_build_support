@@ -262,7 +262,7 @@ for rel, info in rep.get("files", {}).items():
         continue
     entry = {"file": rel, "isa": worst}
     bn = os.path.basename(rel)
-    if bn.startswith(DISPATCH) or any(
+    if info.get("cpuid_dispatch") or bn.startswith(DISPATCH) or any(
             bn.startswith(lib) and worst == feat for lib, feat in GUARDED):
         dispatched.append(entry)
     else:
@@ -287,7 +287,7 @@ ISAPY
     # CPUID check.  Reported, never fatal -- flagging them would be flagging
     # correct behaviour, on precisely the libraries where a hit is expected.
     [ "${ISA_DISPATCH}" -eq 0 ] || \
-      warn "${ISA_DISPATCH} runtime-dispatch librar(ies) carry above-baseline kernels (expected: OpenBLAS/MKL/OpenSSL select on CPUID)"
+      warn "${ISA_DISPATCH} object(s) above baseline but carrying CPUID dispatch (expected: OpenBLAS, libgfortran matmul, MPICH yaksa kernels)"
   else
     warn "no ISA scan report at ${ISA_REPORT:-<unset>}; instruction-set floor NOT checked"
   fi

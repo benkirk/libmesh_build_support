@@ -947,6 +947,15 @@ is not baseline.
 This is the gate paying for itself before it had a wrapper to check: the number
 was previously invisible, and we would have shipped it believing otherwise.
 
+**x86-64, scanned under Rosetta:** all 305 objects within `x86-64-v2`, with 7
+carrying CPUID dispatch. Clean — but only after the scanner learned two things
+from being disbelieved. `tzcnt` is not a hazard: it encodes as `F3 0F BC`, which
+a pre-BMI CPU decodes as `rep bsf` and executes correctly, differing only for a
+zero operand where `__builtin_ctz` is undefined anyway — which is exactly why
+gcc emits it at `-march=nocona`. `lzcnt` stays flagged, because it decodes as
+`rep bsr`, does not fault, and returns a *different answer*: silently wrong
+rather than undefined.
+
 **A build-time compiler wrapper layer** (S2, next PR), in the spirit of
 [NCAR's `ncarcompilers`](https://github.com/NCAR/ncarcompilers), which
 establishes the precedent of intercepting compiler invocations to inject flags
@@ -966,11 +975,18 @@ with `-march=x86-64-vN` specifically and misses `-march=haswell` entirely.
 
 Three details that matter:
 
-- **Runtime dispatch is allowlisted.** OpenBLAS (`DYNAMIC_ARCH`), MKL and OpenSSL
-  deliberately ship AVX-512 kernels selected by a CPUID check at startup. Those
-  are correct. Flagging them would mean flagging correct behaviour on precisely
-  the libraries where a hit is expected — the fastest way to train ourselves to
-  ignore the gate. They are reported separately instead.
+- **Runtime dispatch is DETECTED, not listed.** The first x86-64 scan flagged
+  seven objects, and the interesting part was *which*: not just OpenBLAS, but
+  `libgfortran` (multiversioned matmul), `libmpi` and `libmpi_abi` (MPICH's
+  yaksa pack/unpack kernels), `libstdc++`, `libgcc_s`, `libitm`. A hand-kept
+  list of library names would have had to grow to cover all of those and would
+  still be wrong for the next package added. But every x86 dispatch scheme —
+  ifunc, GCC's `__builtin_cpu_supports`, hand-rolled feature tests — bottoms out
+  in the `CPUID` instruction, and those libraries carry 13–17 of them each. So
+  an object containing `CPUID` is reported as dispatching rather than as a
+  hazard. It is a heuristic and is treated as one: such objects get their own
+  bucket rather than a silent pass, so a library with `CPUID` for an unrelated
+  reason *and* genuinely unguarded AVX-512 still surfaces.
 - **The scan runs during `relocate`**, while `objdump` is still in the tree —
   `binutils` is on `prune.list`. The report is filtered by which files still
   exist, so one scan serves both validate stages. Same constraint that forces
