@@ -36,6 +36,11 @@ patchelf
 git
 # git's own runtime deps that nothing else in the stack wants
 libgit2
+# perl arrives only as a git dependency.  It is also the one package whose
+# libraries live in a nested directory (lib/perl5/.../CORE/libperl.so) that the
+# $ORIGIN/../lib rpath rule does not reach, so keeping it would mean either a
+# permanently unresolved reference or a special case in patchelf.sh.
+perl
 
 # --- glibc floor offenders -----------------------------------------------
 # Measured on linux-aarch64: of 837 ELF objects in the solved env, exactly TWO
@@ -61,4 +66,3 @@ wheel
 tk
 libsqlite
 readline
-ncurses

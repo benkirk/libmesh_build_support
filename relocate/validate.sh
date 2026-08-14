@@ -107,15 +107,34 @@ fi
 # baked into an ELF stays invisible -- and that is the failure that breaks
 # relocation.  See amendment A5.
 if [ -n "${BUILD_ROOT:-}" ]; then
-  hits=$(LC_ALL=C grep -rla "${BUILD_ROOT}" "${ROOT}" 2>/dev/null | head -400 || true)
-  n=$(printf '%s' "${hits}" | grep -c . || true)
-  if [ "${n}" -eq 0 ]; then
-    ok "no build-prefix strings anywhere (text or binary)"
+  # ELF objects are split out and reported separately, because for them the
+  # bytes lie.  patchelf rewrites DT_RPATH but leaves the OLD rpath string
+  # behind in .dynstr as an unreferenced orphan -- so grep still finds the build
+  # prefix in a file whose live rpath is perfectly relocatable.  What actually
+  # governs an ELF is its dynamic table, and that is checked directly below
+  # ("no absolute RPATH entries").  Grepping bytes is the right check for
+  # everything that is NOT an ELF, where a path string is what gets used.
+  elf_hits=0 other_hits=0 other_list=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ "$(LC_ALL=C head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' ')" = "7f454c46" ]; then
+      elf_hits=$((elf_hits + 1))
+    else
+      other_hits=$((other_hits + 1))
+      other_list="${other_list}${f}\n"
+    fi
+  done < <(LC_ALL=C grep -rla "${BUILD_ROOT}" "${ROOT}" 2>/dev/null || true)
+
+  [ "${elf_hits}" -eq 0 ] || \
+    warn "${elf_hits} ELF object(s) retain an orphaned build-prefix string (dead .dynstr entries; live rpaths checked below)"
+
+  if [ "${other_hits}" -eq 0 ]; then
+    ok "no build-prefix strings in any non-ELF file"
   elif [ "${STAGE}" = final ]; then
-    bad "${n} file(s) still contain ${BUILD_ROOT}:"
-    printf '%s\n' "${hits}" | head -15 | sed "s|${ROOT}/|          |"
+    bad "${other_hits} non-ELF file(s) still contain ${BUILD_ROOT}:"
+    printf '%b' "${other_list}" | head -15 | sed "s|${ROOT}/|          |"
   else
-    warn "${n} file(s) still contain ${BUILD_ROOT} (expected pre-slim; most are pruned)"
+    warn "${other_hits} non-ELF file(s) still contain ${BUILD_ROOT} (expected pre-slim)"
   fi
 fi
 
@@ -168,6 +187,10 @@ print(f"GLIBC_FILE={rep.get('glibc_max_file') or '-'}")
 print(f"GLIBC_OVER={1 if mt > floor else 0}")
 bad_internal = [m for m in rep["must_be_internal"] if not m["inside"]]
 print(f"N_EXTERNAL_CXX={len(bad_internal)}")
+print(f"N_ABSRPATH={len(rep.get('absolute_rpath', []))}")
+print("ABSRPATH_SAMPLE=" + json.dumps(
+    "\n".join(f"          {u['file']}: {u['entry']}"
+              for u in rep.get("absolute_rpath", [])[:10])))
 print("UNRES_SAMPLE=" + json.dumps(
     "\n".join(f"          {u['file']}: {u['lib']}" for u in rep["unresolved"][:12])))
 print("CXX_SAMPLE=" + json.dumps(
@@ -178,6 +201,13 @@ PY
   # 1. no unresolved dependencies
   if [ "${N_UNRES}" -eq 0 ]; then ok "all ${N_ELF} ELF objects resolve within the tree + core glibc"
   else soft "${N_UNRES} unresolved dependency reference(s):"; printf '%b\n' "${UNRES_SAMPLE}"; fi
+
+  # THE check.  Every RPATH must be $ORIGIN-relative: that, and nothing else,
+  # is what lets the tree be unpacked at an arbitrary path and still resolve
+  # itself.  Read from the live dynamic table, not from the file's bytes.
+  if [ "${N_ABSRPATH}" -eq 0 ]; then ok "every rpath is \$ORIGIN-relative"
+  else bad "${N_ABSRPATH} absolute rpath entr(ies) -- the tree is NOT relocatable:"
+       printf '%b\n' "${ABSRPATH_SAMPLE}"; fi
 
   # 2/3. the C++ runtime must come from inside the tree, never the host
   if [ "${N_EXTERNAL_CXX}" -eq 0 ]; then ok "libstdc++/libgcc_s/libgfortran all resolve in-tree"

@@ -118,11 +118,15 @@ slim: $(STAMPS)/slim.stamp
 $(STAMPS)/slim.stamp: $(STAMPS)/test-relocated.stamp \
                       relocate/prune.sh relocate/slim.sh conda/prune.list | $(STAMPS)
 	$(call run_hooks,pre-slim)
+# slim BEFORE prune, which reverses the plan's order for a concrete reason:
+# 'strip' is provided only by binutils_impl_*, which prune.list removes, and
+# the miniforge base has no strip either.  Pruning first would silently turn
+# stripping into a no-op.  See the header of relocate/slim.sh.
+	$(SAY) SLIM '$(SLIM_PROFILE)'
+	$(Q)env $(PKG_ENV) SLIM_PROFILE='$(SLIM_PROFILE)' bash relocate/slim.sh
 	$(SAY) PRUNE 'conda/prune.list'
 	$(Q)env $(PKG_ENV) SHIP_PYTHON='$(SHIP_PYTHON)' CONDA_HOME='$(CONDA_HOME)' \
 	  bash relocate/prune.sh
-	$(SAY) SLIM '$(SLIM_PROFILE)'
-	$(Q)env $(PKG_ENV) SLIM_PROFILE='$(SLIM_PROFILE)' bash relocate/slim.sh
 	$(call run_hooks,post-slim)
 	$(Q)touch $@
 

@@ -69,18 +69,29 @@ services:
         BASE_IMAGE: ${VERIFY_IMAGE:-${BASE_IMAGE:-almalinux:9}}
     platform: ${PLATFORM:-linux/arm64}
     working_dir: /verify
+    environment:
+      SMOKE_RANKS: ${SMOKE_RANKS:-4}
     volumes:
       - ../dist:/dist:ro
       - ../test:/verify/test:ro
+      - ../relocate:/verify/relocate:ro
+    # Unpack at a different depth, validate with the LOADER ONLY, then run the
+    # prebuilt binaries.  --runtime rather than --full is not a shortcut: this
+    # image has no python and no binutils, which is exactly the point -- it is
+    # the check a customer's machine can actually perform, and it is performed
+    # here on a poorer image than the one that built the tarball.
     command:
       - bash
       - -euc
       - |
         t=$$(ls -1 /dist/*.tar.gz 2>/dev/null | head -1)
         [ -n "$$t" ] || { echo "no tarball in dist/ -- run 'make dist' first" >&2; exit 1; }
-        echo "unpacking $$t at a different path depth"
+        echo "=== verify on $$(. /etc/os-release && echo $$PRETTY_NAME), glibc $$(ldd --version 2>&1 | head -1 | awk '{print $$NF}')"
+        echo "unpacking $$(basename $$t) at a different path depth"
         mkdir -p /verify/a/b/c && tar -xzf "$$t" -C /verify/a/b/c
-        STACK=/verify/a/b/c/stack bash /verify/test/run.sh relocated
+        S=/verify/a/b/c/stack
+        bash /verify/relocate/validate.sh --runtime --stage final "$$S"
+        STACK="$$S" WORK=/tmp/verify-work bash /verify/test/run.sh relocated
 
 volumes:
   build-root:

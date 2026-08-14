@@ -286,7 +286,7 @@ def info(path, root=None):
 def scan(root):
     root = os.path.abspath(root)
     files, unresolved, external, internal_needed = [], [], [], []
-    optional = []
+    optional, absolute_rpath = [], []
     glibc_max, glibc_who = (0, 0), None
 
     for p in iter_elf(root):
@@ -297,6 +297,15 @@ def scan(root):
         rel = os.path.relpath(p, root)
         d["rel"] = rel
         files.append(d)
+
+        # The single most important property in the whole system: no object may
+        # name an absolute directory in its RPATH.  This is what makes the tree
+        # relocatable, and it is checked against the LIVE dynamic entries rather
+        # than by grepping bytes -- patchelf leaves the old RPATH string behind
+        # in .dynstr as an orphan, so the bytes lie and the dynamic table does not.
+        for entry in d["rpath"] + d["runpath"]:
+            if not entry.startswith("$ORIGIN") and not entry.startswith("${ORIGIN}"):
+                absolute_rpath.append({"file": rel, "entry": entry})
 
         if d["glibc_max"] and version_tuple(d["glibc_max"]) > glibc_max:
             glibc_max, glibc_who = version_tuple(d["glibc_max"]), rel
@@ -323,6 +332,7 @@ def scan(root):
         "unresolved": unresolved,
         "external_core": external,
         "optional_host": optional,
+        "absolute_rpath": absolute_rpath,
         "must_be_internal": internal_needed,
         "files": files,
     }

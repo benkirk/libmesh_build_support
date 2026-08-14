@@ -93,6 +93,17 @@ done < <(find "${STACK}/bin" "${STACK}/sbin" "${STACK}/libexec" \
 la_removed="$(find "${STACK}" -name '*.la' -type f -print -delete 2>/dev/null | wc -l)"
 
 #------------------------------------------------------------------------------
+# HDF5 bakes an absolute plugin directory into its public header, so every
+# consumer that includes H5pubconf.h would inherit OUR build path.  There is no
+# relative form for a #define, so reset it to HDF5's own upstream default rather
+# than inventing one.  We ship no HDF5 filter plugins, so nothing looks there.
+h5conf="${STACK}/include/H5pubconf.h"
+if [ -f "${h5conf}" ] && grep -q "${STACK}" "${h5conf}"; then
+  sed -i "s|\"${STACK}[^\"]*\"|\"/usr/local/hdf5/lib/plugin\"|g" "${h5conf}"
+  echo "fixup: reset H5_DEFAULT_PLUGINDIR in H5pubconf.h"
+fi
+
+#------------------------------------------------------------------------------
 # The shipped activation script.  Installed here rather than at conda time
 # because it belongs to the relocated artifact, not to the build environment.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

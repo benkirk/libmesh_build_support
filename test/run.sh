@@ -92,10 +92,27 @@ case "${MODE}" in
 
     # Then, and only as a bonus, prove the relocated tree can still compile --
     # but only where that is even possible.
-    if [ ! -f "${SMOKE_DIR}/Makefile" ]; then
+    # Is there a working C compiler IN the tree?  Testing for mpicc is not
+    # enough: mpicc is a wrapper, it is deliberately shipped, and the compiler
+    # it wraps is deliberately NOT -- conda/prune.list drops gcc_impl and the
+    # sysroot, which is where the measured ~530 MB of the artifact's diet comes
+    # from.  So the shipped tarball has mpicc and no cc behind it.
+    #
+    # That is the intended shape, not a defect: the supported way to build
+    # against this stack is inside the template, before the prune, where the
+    # whole toolchain is present.  A customer compiling against the shipped
+    # tarball uses their own compiler, and mpicc is still useful to them --
+    # 'mpicc -show' yields the flags, and MPICH honours MPICH_CC to point the
+    # wrapper at a compiler of their choosing.
+    cc_in_tree=""
+    for c in "${STACK}"/bin/*-gcc "${STACK}"/bin/*-cc "${STACK}/bin/gcc" "${STACK}/bin/cc"; do
+      [ -x "${c}" ] && { cc_in_tree="${c}"; break; }
+    done
+
+    if [ -z "${cc_in_tree}" ]; then
+      echo "--- rebuild skipped: the artifact ships no compiler (by design; see conda/prune.list)"
+    elif [ ! -f "${SMOKE_DIR}/Makefile" ]; then
       echo "--- rebuild skipped: no smoke sources mounted"
-    elif [ ! -x "${STACK}/bin/mpicc" ]; then
-      echo "--- rebuild skipped: no compiler in the tree (SLIM_PROFILE=runtime)"
     elif ! command -v make >/dev/null 2>&1; then
       echo "--- rebuild skipped: no make on this host (pristine verify image)"
     else

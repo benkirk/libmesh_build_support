@@ -31,7 +31,21 @@ RPATH_MODE="${RPATH_MODE:-rpath}"
 PATCHELF="${PATCHELF:-${STACK}/bin/patchelf}"
 
 command -v "${PATCHELF}" >/dev/null 2>&1 || PATCHELF=patchelf
-command -v "${PATCHELF}" >/dev/null 2>&1 || { echo "patchelf not found" >&2; exit 1; }
+if ! command -v "${PATCHELF}" >/dev/null 2>&1; then
+  # Almost always this means the tree has already been through slim+prune,
+  # which removes patchelf along with the rest of the build tools.  The stages
+  # mutate $STACK in place and are not re-runnable against an already-pruned
+  # tree, so say so rather than leaving "patchelf not found" to be decoded.
+  if [ ! -d "${STACK}/conda-meta" ] || [ ! -x "${STACK}/bin/cmake" ]; then
+    echo "patchelf is gone from ${STACK}." >&2
+    echo "This tree has already been pruned; the relocate/slim stages rewrite" >&2
+    echo "\$STACK in place and cannot be re-run over their own output." >&2
+    echo "Start from a fresh environment:  make distclean && make all" >&2
+  else
+    echo "patchelf not found in ${STACK}/bin or on PATH" >&2
+  fi
+  exit 1
+fi
 
 # patchelf < 0.18 can corrupt binaries when it has to grow the program headers,
 # and the plan called for pinning >= 0.18 "from conda".  That turns out not to
