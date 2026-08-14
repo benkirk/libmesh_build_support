@@ -207,10 +207,18 @@ under `mpiexec -n N` at every test point, including inside `distcheck`.
 **Deferred:** letting a customer substitute their own ABI-compatible MPI. Not sprint
 scope. What keeps the door open costs nothing now and needs no extra design:
 
-- conda-forge's mpich exports the standard MPICH ABI SONAME `libmpi.so.12`, shared
-  with Intel MPI and MVAPICH. Harvesting it as an ordinary shared library under that
-  SONAME — rather than renaming, wrapping, or partially inlining it — is simply the
-  default behaviour, and is the whole of "don't break it by design."
+- conda-forge's mpich exports the MPICH ABI SONAME `libmpi.so.12`, shared with Intel
+  MPI and MVAPICH. **Verified against mpich 5.0.1**: despite the major version bump it
+  still ships `libmpi.so.12.6.1` with `SONAME libmpi.so.12`. Installing it as an
+  ordinary shared library under that SONAME — rather than renaming, wrapping, or
+  partially inlining it — is simply the default behaviour, and is the whole of
+  "don't break it by design."
+- **MPICH 5.0 additionally ships `libmpi_abi.so.1` plus `mpicc_abi`/`mpicxx_abi`
+  wrappers** — the standardized MPI-5 ABI, which OpenMPI is also implementing. That is
+  a genuine cross-implementation interface rather than MPICH's older informal
+  compatibility initiative. If it lands broadly it makes the deferred substitution
+  work materially easier than assumed here, so the follow-on should re-evaluate
+  against `libmpi_abi` rather than starting from the `libmpi.so.12` assumption.
 - With DT_RPATH (see S4) resolution is by SONAME *within the tree*, so the eventual
   substitution mechanism is "replace `stack/lib/libmpi.so.12`", which works fine.
   `LD_LIBRARY_PATH`-based override does not work under RPATH — that is an accepted
@@ -232,12 +240,16 @@ stays MPICH. The old repo already carried both recipes (`mpich/build.sh`,
   set `PATH` — and unlike `LD_LIBRARY_PATH`, these are the vendor's intended interface,
   not a workaround for a failed RPATH. Wrapper data in
   `share/openmpi/*-wrapper-data.txt` also carries baked paths for `fixup-text.sh`.
-- **Far more dlopen surface.** OpenMPI's MCA components live in `lib/openmpi/mca_*.so`
-  and are all dlopened. Conda's `openmpi 5.0.10` additionally pulls `ucx`, `ucc`,
-  `libfabric`/`libfabric1`, `libpmix`, `libnl`, `libevent`, `libhwloc` — a fabric stack
-  with its own provider plugins, none of it visible to a dependency closure. Our
-  whole-package prune granularity already handles this correctly; it is precisely why
-  that rule is non-negotiable. Expect a materially larger artifact than MPICH.
+- **More dlopen surface — but the gap is narrower than it first appears.** OpenMPI's
+  MCA components live in `lib/openmpi/mca_*.so` and are all dlopened, and conda's
+  `openmpi 5.0.10` pulls `ucx`, `ucc`, `libfabric`/`libfabric1`, `libpmix`, `libnl`,
+  `libevent`, `libhwloc`. It would be wrong to file this as an OpenMPI-only problem:
+  conda's `mpich 5.0.1` on ch4/ucx drags in much the same fabric stack (ucx, libnl,
+  the `ibv_*`/`rdma_*` tooling, hwloc, and icu/libxml2 behind hwloc's XML support).
+  Either family lands a fabric stack whose plugins are invisible to a dependency
+  closure — which is precisely why whole-package prune granularity is non-negotiable
+  regardless of `MPI_FAMILY`. OpenMPI is still the larger artifact, but not by the
+  margin the MCA layout alone suggests.
 - **Different ABI.** OpenMPI is `libmpi.so.40` and is *not* MPICH-ABI compatible, so
   the deferred external-MPI substitution is family-scoped: an OpenMPI-built tree can
   only ever accept another OpenMPI.
@@ -294,8 +306,11 @@ No longer a spike — the harvest step that made it one is gone.
   current 14.x and the intended default.
   Note the two measured traps above: **no bare `libblas`/`liblapack`** (drags in MKL)
   and **no `mpich-mpi*` split packages** — those are stale and pin mpich back to
-  3.2.1 when current mpich is **5.0.1**. Modern builds ship the wrappers in the main
-  package. OpenMPI's current release is **5.0.10**.
+  3.2.1 when current mpich is **5.0.1** (full conda-forge line: 3.2.1 → 3.3.x → 3.4.x
+  → 4.0–4.3.2 → 5.0.0 → 5.0.1). Verified that mpich 5.0.1's main package ships
+  `mpicc`/`mpicxx`/`mpifort`/`mpiexec`/`hydra_pmi_proxy` directly, so the split
+  packages buy nothing. OpenMPI's current release is **5.0.10** (conda-forge has no
+  5.0.9).
   `BLAS_PROVIDER` is a first-class parameter on every platform: `openblas` → the
   OSS-licensed artifact and the default; `mkl` → the optimized x86-only artifact,
   selected via `blas=*=mkl`. aarch64 rejects `mkl` at config time.
