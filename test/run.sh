@@ -1,26 +1,112 @@
 #!/usr/bin/env bash
 # test/run.sh MODE   (MODE = inplace | relocated)
 #
-# Builds and runs the smoke example against a stack.  In 'relocated' mode
-# $STACK points at an unpacked tarball somewhere else on disk, and the
-# prebuilt binary is exercised FIRST -- that is the guarantee that matters.
+#   inplace    build the smoke example against the stack, then run it.
+#   relocated  $STACK is an unpacked tarball somewhere else on disk.  Run the
+#              PREBUILT binary first -- that is the guarantee that matters --
+#              and only then try to rebuild, and only if this host can.
+#
+# The asymmetry is the whole point.  In relocated mode a rebuild would prove
+# that the tree can still compile, which is a weaker and different claim than
+# "the binary we shipped runs where you put it".  The verify image has no
+# compiler at all, so the rebuild is skipped there rather than failing.
 set -euo pipefail
 
 MODE="${1:-inplace}"
-: "${STACK:?}"
+: "${STACK:?STACK must be set}"
 SMOKE_RANKS="${SMOKE_RANKS:-4}"
 SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/smoke" && pwd)"
+SMOKE_BIN="${STACK}/libexec/smoke"
 
-[ -f "${SMOKE_DIR}/Makefile" ] || {
-  echo "test/smoke/ has no Makefile yet -- awaiting the libMesh example." >&2
-  echo "Contract: 'make all' builds, 'make run' runs, given LIBMESH_DIR," >&2
-  echo "PETSC_DIR and MPIEXEC in the environment." >&2
-  exit 1
+# The contract this harness supplies to test/smoke/Makefile.
+export STACK
+export WORK="${WORK:-${TMPDIR:-/tmp}/smoke-work}"
+export PETSC_DIR="${PETSC_DIR:-${STACK}}"
+export LIBMESH_DIR="${LIBMESH_DIR:-${STACK}}"
+export TRILINOS_DIR="${TRILINOS_DIR:-${STACK}}"
+export MPIEXEC="${MPIEXEC:-${STACK}/bin/mpiexec}"
+
+# activate.sh is S4's deliverable; until it exists, put the stack on PATH
+# ourselves.  mpicc invokes <triplet>-cc by name and fails confusingly without.
+if [ -r "${STACK}/activate.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${STACK}/activate.sh"
+else
+  export PATH="${STACK}/bin:${PATH}"
+fi
+
+fail () { echo "FAIL: $*" >&2; exit 1; }
+
+#------------------------------------------------------------------------------
+# Assert the output really came from N cooperating ranks.
+#
+# Checking only the rank-0 summary would miss the failure mode this exists for:
+# a binary that is not MPI-linked, or is linked against a different MPI than the
+# launcher, yields N independent processes that each believe they are rank 0 of
+# 1 -- and all of them exit 0.  So require every rank id 0..N-1 to appear, and
+# require every rank to have reported the same size.
+assert_ranks () {
+  local want="$1" out="$2" r seen
+  for (( r = 0; r < want; r++ )); do
+    grep -qx "smoke: rank ${r}/${want}" <<<"${out}" \
+      || fail "no 'rank ${r}/${want}' line -- ranks did not agree on the communicator size"
+  done
+  seen=$(grep -c '^smoke: rank ' <<<"${out}" || true)
+  [ "${seen}" -eq "${want}" ] || fail "expected ${want} rank lines, saw ${seen}"
+  grep -qx "smoke: ranks=${want}" <<<"${out}" || fail "missing 'ranks=${want}' summary"
 }
 
-. "${STACK}/activate.sh"
+run_serial () {
+  local out
+  echo "--- serial"
+  out=$("${SMOKE_BIN}") || fail "serial run exited non-zero"
+  echo "${out}"
+  assert_ranks 1 "${out}"
+}
 
-echo "=== smoke: ${MODE} (ranks=${SMOKE_RANKS}) ==="
-make -C "${SMOKE_DIR}" all
-make -C "${SMOKE_DIR}" run
-"${STACK}/bin/mpiexec" -n "${SMOKE_RANKS}" "${SMOKE_DIR}/smoke"
+run_parallel () {
+  local out
+  echo "--- mpiexec -n ${SMOKE_RANKS}"
+  out=$("${MPIEXEC}" -n "${SMOKE_RANKS}" "${SMOKE_BIN}") \
+    || fail "mpiexec -n ${SMOKE_RANKS} exited non-zero"
+  echo "${out}"
+  assert_ranks "${SMOKE_RANKS}" "${out}"
+}
+
+#------------------------------------------------------------------------------
+echo "=== smoke: ${MODE} (ranks=${SMOKE_RANKS}, stack=${STACK})"
+
+case "${MODE}" in
+  inplace)
+    [ -f "${SMOKE_DIR}/Makefile" ] || fail "test/smoke/ has no Makefile"
+    make -C "${SMOKE_DIR}" all
+    run_serial
+    run_parallel
+    ;;
+
+  relocated)
+    # The prebuilt binary, first and unconditionally.
+    [ -x "${SMOKE_BIN}" ] || fail "no prebuilt ${SMOKE_BIN} in the unpacked tree"
+    run_serial
+    run_parallel
+
+    # Then, and only as a bonus, prove the relocated tree can still compile --
+    # but only where that is even possible.
+    if [ ! -f "${SMOKE_DIR}/Makefile" ]; then
+      echo "--- rebuild skipped: no smoke sources mounted"
+    elif [ ! -x "${STACK}/bin/mpicc" ]; then
+      echo "--- rebuild skipped: no compiler in the tree (SLIM_PROFILE=runtime)"
+    elif ! command -v make >/dev/null 2>&1; then
+      echo "--- rebuild skipped: no make on this host (pristine verify image)"
+    else
+      echo "--- rebuild against the relocated tree"
+      make -C "${SMOKE_DIR}" clean all
+      run_serial
+      run_parallel
+    fi
+    ;;
+
+  *) fail "unknown MODE '${MODE}' (want inplace | relocated)" ;;
+esac
+
+echo "=== smoke: ${MODE} OK"
