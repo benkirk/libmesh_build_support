@@ -1,14 +1,43 @@
 # mk/stages.mk -- the stage targets and their ordering.
-# Mirrors the seven steps in docs/RELOCATABLE-STACK-PLAN.md.
+# Mirrors the numbered steps in docs/RELOCATABLE-STACK-PLAN.md:
+#
+#   1 conda -> 2 build -> 3 test -> 4 relocate -> validate -> 5 test
+#                      -> 6 slim -> validate -> 7 dist -> distcheck
+#
+# Ordering is expressed as a real dependency graph, not as a sequence of
+# sub-makes, so 'make -n all' prints the plan once and in order.
+#
+# The verifying stages (test, validate) appear twice each, so they get one
+# stamp per position in the chain, named for what they verify.  A gate stamp
+# is legitimate caching -- if nothing downstream of it changed, its verdict
+# still holds -- but the plain 'make test' and 'make validate' entry points
+# are phony and ALWAYS re-run, because a gate you can satisfy by not running
+# it is not a gate.
 
 .PHONY: all conda build test relocate validate slim dist distcheck \
         help shell clean distclean conda-lock print-config
 
-## all: run the whole workflow, conda through distcheck
-all: dist
+## all: the whole workflow, conda through distcheck
+all: distcheck
 
 $(BUILD_ROOT) $(STACK) $(WORK) $(STAMPS) $(LOGS) $(SRC_CACHE) $(DIST_DIR):
 	$(Q)mkdir -p $@
+
+#-------------------------------------------------------------------------------
+# The two verifying actions, defined once and referenced from both the phony
+# entry point and the stamped position in the chain.  $(1) is a label.
+define do_test
+	$(call run_hooks,pre-test)
+	$(SAY) TEST '$(1)'
+	$(Q)env $(PKG_ENV) SMOKE_RANKS='$(SMOKE_RANKS)' bash test/run.sh inplace
+	$(call run_hooks,post-test)
+endef
+
+define do_validate
+	$(SAY) VALIDATE '$(1)'
+	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
+	  bash relocate/validate.sh --full '$(STACK)'
+endef
 
 #-------------------------------------------------------------------------------
 ## conda: step 1 -- bootstrap miniforge and create the env AS the stack prefix
@@ -28,23 +57,33 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 #-------------------------------------------------------------------------------
 ## build: step 2 -- build the source packages into the same prefix
 build: $(STAMPS)/build.stamp
-$(STAMPS)/build.stamp: $(STAMPS)/conda.stamp $(foreach p,$(PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
+$(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
+                       $(foreach p,$(PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
 	$(call run_hooks,post-build)
 	$(Q)touch $@
 
-# Every package depends on the conda env existing first.
-$(foreach p,$(PKGS),$(eval $(STAMPS)/$(p).stamp: $(STAMPS)/conda.stamp))
+# pre-build runs once, before any package -- hence its own stamp rather than
+# a hook on build.stamp, which runs after the packages.
+$(STAMPS)/prebuild.stamp: $(STAMPS)/conda.stamp | $(STAMPS)
+	$(call run_hooks,pre-build)
+	$(Q)touch $@
+$(foreach p,$(PKGS),$(eval $(STAMPS)/$(p).stamp: $(STAMPS)/prebuild.stamp))
 
 #-------------------------------------------------------------------------------
-## test: steps 3 and 5 -- build and run the smoke example in place
+## test: build and run the smoke example in place -- always re-runs
 test: $(STAMPS)/build.stamp
-	$(SAY) TEST 'in place'
-	$(Q)env $(PKG_ENV) SMOKE_RANKS='$(SMOKE_RANKS)' bash test/run.sh inplace
+	$(call do_test,in place)
+
+# step 3: in place, before anything is rewritten
+$(STAMPS)/test-built.stamp: $(STAMPS)/build.stamp test/run.sh | $(STAMPS)
+	$(call do_test,in place)
+	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
 ## relocate: step 4 -- patchelf to $ORIGIN-relative rpaths, rewrite embedded paths
 relocate: $(STAMPS)/relocate.stamp
-$(STAMPS)/relocate.stamp: $(STAMPS)/build.stamp relocate/patchelf.sh relocate/fixup-text.sh | $(STAMPS)
+$(STAMPS)/relocate.stamp: $(STAMPS)/test-built.stamp \
+                          relocate/patchelf.sh relocate/fixup-text.sh | $(STAMPS)
 	$(call run_hooks,pre-relocate)
 	$(SAY) PATCHELF '$(RPATH_MODE)'
 	$(Q)env $(PKG_ENV) bash relocate/patchelf.sh
@@ -55,14 +94,24 @@ $(STAMPS)/relocate.stamp: $(STAMPS)/build.stamp relocate/patchelf.sh relocate/fi
 
 #-------------------------------------------------------------------------------
 ## validate: the gate -- no unexpected host dependencies, C++ runtime in-tree
-validate: relocate/validate.sh
-	$(SAY) VALIDATE '$(STACK)'
-	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
-	  bash relocate/validate.sh
+validate: $(STAMPS)/relocate.stamp relocate/validate.sh
+	$(call do_validate,$(STACK))
+
+# the gate, immediately after relocation
+$(STAMPS)/validate-relocated.stamp: $(STAMPS)/relocate.stamp relocate/validate.sh | $(STAMPS)
+	$(call do_validate,post-relocate)
+	$(Q)touch $@
+
+# step 5: in place again, proving relocation did not break the build tree
+$(STAMPS)/test-relocated.stamp: $(STAMPS)/validate-relocated.stamp test/run.sh | $(STAMPS)
+	$(call do_test,in place / post-relocate)
+	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
 ## slim: step 6 -- prune build-only conda packages, then trim files
-slim: $(STAMPS)/relocate.stamp
+slim: $(STAMPS)/slim.stamp
+$(STAMPS)/slim.stamp: $(STAMPS)/test-relocated.stamp \
+                      relocate/prune.sh relocate/slim.sh conda/prune.list | $(STAMPS)
 	$(call run_hooks,pre-slim)
 	$(SAY) PRUNE 'conda/prune.list'
 	$(Q)env $(PKG_ENV) SHIP_PYTHON='$(SHIP_PYTHON)' CONDA_HOME='$(CONDA_HOME)' \
@@ -70,10 +119,18 @@ slim: $(STAMPS)/relocate.stamp
 	$(SAY) SLIM '$(SLIM_PROFILE)'
 	$(Q)env $(PKG_ENV) SLIM_PROFILE='$(SLIM_PROFILE)' bash relocate/slim.sh
 	$(call run_hooks,post-slim)
+	$(Q)touch $@
+
+# the gate again, after pruning -- this is the one that catches a prune that
+# took libstdc++.so.6 or libgcc_s.so.1 with it
+$(STAMPS)/validate-slimmed.stamp: $(STAMPS)/slim.stamp relocate/validate.sh | $(STAMPS)
+	$(call do_validate,post-slim)
+	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
-## dist: step 7a -- reproducible tarball
-dist: $(STAMPS)/relocate.stamp | $(DIST_DIR)
+## dist: step 7a -- reproducible tarball of the pruned, slimmed, validated tree
+dist: $(STAMPS)/validate-slimmed.stamp | $(DIST_DIR)
+	$(call run_hooks,pre-dist)
 	$(SAY) TAR '$(notdir $(TARBALL))'
 	$(Q)tar --sort=name --owner=0 --group=0 --numeric-owner \
 	  --mtime="@$${SOURCE_DATE_EPOCH:-0}" \
@@ -93,6 +150,13 @@ conda-lock:
 	$(SAY) LOCK 'conda/lock'
 	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' bash conda/lock.sh
 
+## shell: an interactive shell with $(STACK)/bin on PATH
+# Deliberately minimal.  Once S4 lands, $(STACK)/activate.sh is the real entry
+# point and this becomes a thin wrapper around it.
+shell: $(STAMPS)/conda.stamp
+	$(SAY) SHELL '$(STACK)'
+	$(Q)env $(PKG_ENV) PATH='$(STACK)/bin':"$$PATH" bash -i
+
 ## print-config: show the resolved knobs and paths
 print-config:
 	@printf '%-16s %s\n' \
@@ -102,7 +166,7 @@ print-config:
 	  MPI_FAMILY '$(MPI_FAMILY)' MPI_PROVIDER '$(MPI_PROVIDER)' \
 	  MPI_VERSION '$(MPI_VERSION)' RPATH_MODE '$(RPATH_MODE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
-	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' \
+	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(PKGS)' TARBALL '$(TARBALL)'
 
 ## clean: remove build stamps and logs, keep the conda env and caches
