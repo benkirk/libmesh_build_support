@@ -9,9 +9,18 @@ Everything you need to pick this up on a Mac. Written after landing **S0**
 
 ## TL;DR
 
-The repo now builds a conda environment that **is** the redistributable prefix.
-`make conda` works and is verified. Everything from `relocate` onward is a stub
-that exits non-zero, carrying the spec it will be built against.
+**`make all` is green end to end on native `linux-aarch64`.** The conda
+environment **is** the redistributable prefix; it is relocated with
+`$ORIGIN` rpaths, pruned from 1.6 G to a **60 MB** tarball, and `distcheck`
+proves the claim: tar, move the original out of its path, unpack at a different
+directory depth, validate, run 4 MPI ranks from there.
+
+Verified across distros, which is the part that matters — built on
+`almalinux:9`, then unpacked and run on `ubuntu:24.04` (glibc 2.39) **and on
+`almalinux:8` (glibc 2.28, the declared floor)**.
+
+Still to come: the PETSc / libMesh / Trilinos recipes, and the real smoke
+example.
 
 ## Get running on the Mac
 
