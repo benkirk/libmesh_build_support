@@ -33,6 +33,23 @@ cmake
 ninja
 pkg-config
 patchelf
+git
+# git's own runtime deps that nothing else in the stack wants
+libgit2
+
+# --- glibc floor offenders -----------------------------------------------
+# Measured on linux-aarch64: of 837 ELF objects in the solved env, exactly TWO
+# require a glibc newer than the 2.28 floor -- libsystemd.so.0 and libudev.so.1,
+# both needing 2.34.  Nothing in the tree DT_NEEDEDs them and nothing names them
+# for dlopen; libibverbs links only libnl.  They arrive purely as declared conda
+# dependencies of rdma-core, which mpich's ch4 fabric stack pulls in.
+#
+# Dropping them takes the artifact's effective floor from 2.34 back to 2.28 --
+# which is the difference between running on almalinux:8 and openSUSE Leap 15
+# or not.  Cheapest two lines in this file.  v0 reached the same conclusion the
+# hard way, via mpich's --with-hwloc-prefix=embedded --disable-libudev.
+libsystemd0
+libudev1
 
 # --- python stack: removed only when SHIP_PYTHON=no (see relocate/prune.sh) ---
 #@python-only

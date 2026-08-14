@@ -21,7 +21,12 @@ x-common: &common
   platform: ${PLATFORM:-linux/arm64}
   working_dir: /src
   environment:
-    BUILD_ROOT: /build
+    # Longer than the obvious /build, so path handling gets exercised rather
+    # than being trivially short.  Conda's padded binary prefix slots are 255
+    # bytes wide (measured), so they are not the binding constraint that
+    # amendment A6 originally feared -- but 255 IS a hard ceiling on the
+    # installed path, and validate.sh checks it.
+    BUILD_ROOT: /opt/libmesh-stack-build-root
     CONDA_PKGS_DIRS: /cache/conda-pkgs
     SRC_CACHE: /cache/src
     DIST_DIR: /src/dist
@@ -36,7 +41,7 @@ x-common: &common
     # BUILD_ROOT: named volume, NOT a bind mount. ~2 GB and hundreds of
     # thousands of files -- on macOS a bind mount here is the difference
     # between minutes and hours.
-    - build-root:/build
+    - build-root:/opt/libmesh-stack-build-root
     # Caches survive 'compose down', so re-solves and rebuilds cost no network.
     - conda-pkgs:/cache/conda-pkgs
     - src-cache:/cache/src

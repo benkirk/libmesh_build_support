@@ -50,6 +50,7 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 	  TARGET_PLATFORM='$(TARGET_PLATFORM)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
 	  GCC_VERSION='$(GCC_VERSION)' MPI_VERSION='$(MPI_VERSION)' \
 	  MPI_PROVIDER='$(MPI_PROVIDER)' \
+	  HDF5_VERSION='$(HDF5_VERSION)' HDF5_PARALLEL='$(HDF5_PARALLEL)' \
 	  bash conda/bootstrap.sh
 	$(call run_hooks,post-conda)
 	$(Q)touch $@
@@ -148,7 +149,8 @@ distcheck: dist
 ## conda-lock: regenerate the checked-in explicit lock files
 conda-lock:
 	$(SAY) LOCK 'conda/lock'
-	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' bash conda/lock.sh
+	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
 
 ## shell: an interactive shell with $(STACK)/bin on PATH
 # Deliberately minimal.  Once S4 lands, $(STACK)/activate.sh is the real entry
@@ -164,7 +166,9 @@ print-config:
 	  TARGET_PLATFORM '$(TARGET_PLATFORM)' GLIBC_FLOOR '$(GLIBC_FLOOR)' \
 	  GCC_VERSION '$(GCC_VERSION)' BLAS_PROVIDER '$(BLAS_PROVIDER)' \
 	  MPI_FAMILY '$(MPI_FAMILY)' MPI_PROVIDER '$(MPI_PROVIDER)' \
-	  MPI_VERSION '$(MPI_VERSION)' RPATH_MODE '$(RPATH_MODE)' \
+	  MPI_VERSION '$(MPI_VERSION)' \
+	  HDF5_VERSION '$(HDF5_VERSION)' HDF5_PARALLEL '$(HDF5_PARALLEL)' \
+	  RPATH_MODE '$(RPATH_MODE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \

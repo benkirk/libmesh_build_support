@@ -21,6 +21,15 @@
 #MPI_PROVIDER    := conda           # conda | source
 #MPI_VERSION     := 5.0.1           # mpich 5.0.1 | openmpi 5.0.10
 
+# conda-forge ships hdf5 as nompi_* / mpi_<family>_* variants and gives nompi a
+# +100 build number, so an unpinned request lands on serial by accident.  We
+# pin it deliberately instead.  Serial is the default: it is what the v0 stack
+# shipped, libMesh was its only consumer, and the mpi_* variant makes libhdf5
+# link libmpi -- which drags MPI into the closure of everything touching HDF5.
+# Set yes for collective I/O (PETSc's HDF5 viewer, parallel Exodus/NetCDF4).
+#HDF5_PARALLEL   := no              # no | yes
+#HDF5_VERSION    := 1.14            # 1.14 is current stable; 2.x is an API break
+
 # rpath resists a polluted LD_LIBRARY_PATH on the customer's host and is the
 # default; runpath is for debugging and for the deferred external-MPI work.
 #RPATH_MODE      := rpath           # rpath | runpath

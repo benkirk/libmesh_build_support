@@ -686,15 +686,38 @@ conda-forge and post-date the pinned PETSc and libMesh. Pin `hdf5=1.14.*` —
 well ahead of v0's 1.10.6, and short of a major-version API change that
 NetCDF4/Exodus have not been tested against here.
 
-**A4 — the shipped glibc floor is not the one we pin.** `GLIBC_FLOOR` pins
-`sysroot_*`, which constrains only *our* compilations. Every prebuilt
-conda-forge binary in the tree — mpich, openblas, libgcc, hwloc, ucx — carries
-conda-forge's own baseline, so the effective floor is the max of the two and
-`2.17` is not deliverable from conda binaries regardless of the pin. Validator
-rule 4 must **measure** the maximum required `GLIBC_x.y` across the tree, fail
-if it exceeds `GLIBC_FLOOR`, and record the measured value in
-`stack-manifest.json`. §Locked decisions' "`2.17` supported" is downgraded to
-aspirational until proven.
+**A4 — the shipped glibc floor is not the one we pin. Measured.** `GLIBC_FLOOR`
+pins `sysroot_*`, which constrains only *our* compilations; every prebuilt
+conda-forge binary carries conda-forge's own baseline, so the effective floor is
+the max of the two.
+
+Measured on `linux-aarch64`, `GLIBC_FLOOR=2.28`, across all **837** ELF objects
+in the solved env: the maximum required symbol version is **`GLIBC_2.34`**, not
+2.28. So the claim was real — but the blast radius is tiny. Exactly **two**
+files exceed 2.28:
+
+```
+lib/libsystemd.so.0.44.0    GLIBC_2.34
+lib/libudev.so.1.7.14       GLIBC_2.34
+```
+
+Everything else — all 835 — sits at 2.28 or below. And nothing in the tree
+`DT_NEEDED`s either of them, nor names them for `dlopen`; `libibverbs` links
+only `libnl`. They arrive purely as declared conda dependencies of `rdma-core`,
+which mpich's ch4 fabric stack pulls in. **They are now on `conda/prune.list`**,
+which takes the artifact's effective floor back to 2.28 — the difference between
+running on `almalinux:8` and `opensuse/leap:15` or not, i.e. two of the five
+images in `docker/bases.env`. (v0 reached the same place the hard way, with
+mpich's `--with-hwloc-prefix=embedded --disable-libudev`.)
+
+Validator rule 4 must still **measure** rather than assume: compute the max
+required `GLIBC_x.y` over the final, pruned tree, fail if it exceeds
+`GLIBC_FLOOR`, and record the measured value in `stack-manifest.json` and in the
+tarball name. The point stands even though this instance was cheap to fix — the
+number has to be observed, not pinned.
+
+§Locked decisions' "`2.17` supported" remains downgraded to aspirational: the
+floor is a property of the *solve*, and only measurement tells you what you got.
 
 **A5 — `grep -rI "$(BUILD_ROOT)"` cannot catch the failure that matters.** `-I`
 means *ignore binary files*, so a build-root path baked into an ELF — precisely
@@ -702,14 +725,23 @@ what breaks relocation — is invisible to it. Used as §S4's success criterion 
 again in §Verification's spot checks. Must scan binaries, with a narrow and
 justified allowlist.
 
-**A6 — conda's padded-binary prefix rewriting is one-way.** `conda-meta` marks
-each embedded-prefix file `text` or `binary`; padded binary slots can be
-rewritten only to an equal-or-shorter path with NUL padding, never lengthened.
-The plan leans on that inventory as its primary fixup mechanism without saying
-so. Two consequences: RPATH is the runtime-critical case and `patchelf` owns it,
-so the remaining padded slots must be shown to be non-critical; and the build
-should happen at a deliberately **long** `BUILD_ROOT` so shortening is always
-available. `/build` in `docker/compose.yaml` is short.
+**A6 — conda's padded-binary prefix rewriting has a hard ceiling. Measured, and
+milder than first assumed.** `conda-meta` marks each embedded-prefix file `text`
+or `binary`; a padded binary slot can only ever be rewritten within the space
+the placeholder reserved, NUL-padded. The plan leans on that inventory as its
+primary fixup mechanism without saying so.
+
+Measured on the solved env: the placeholder is **255 bytes**, uniformly, and
+only **287 of 22,636** installed files carry a binary-embedded prefix at all.
+Our build prefix is 35 bytes, so there is ~220 bytes of headroom.
+
+So the constraint is *not* "can only shorten relative to the build path", as
+first written here — it is a flat **255-byte ceiling on the installed prefix**,
+which is generous and, more importantly, checkable. Concretely:
+`relocate/fixup-text.sh` must write into the NUL-padded field rather than assume
+it can only shrink, and `validate.sh` must reject an install path over 255
+bytes. The 287-file inventory is small enough to enumerate and assert on
+directly.
 
 **A7 — the validator needs tools the tarball will not have.** `validate.sh`
 needs `readelf`/`objdump` (binutils is on `prune.list`) and `depsolve.py` needs
@@ -750,3 +782,48 @@ Kokkos became a mandatory dependency of Sacado in later Trilinos. The pins stay
 at 14-4-0 for now, so this is the first thing to test when the Trilinos recipe
 lands; the fallback is to bump Trilinos alone. `-DTPL_ENABLE_DLlib=OFF` was a
 static-era flag and must flip to `ON`.
+
+### Observed while landing the conda stage
+
+**A13 — `GCC_VERSION` does not control the shipped C++ runtime.** The solved env
+on `linux-aarch64` with `GCC_VERSION=14` contains:
+
+```
+gcc_linux-aarch64      14.4.0      <- the compiler, as pinned
+libgcc / libgcc-ng     16.1.0      <- the runtime that ships
+libstdcxx / libstdcxx-ng 16.1.0
+```
+
+This is conda-forge behaving as designed — libstdc++ is backward compatible, so
+the channel ships the newest runtime and lets it serve code built by any older
+gcc. It is not a bug, and it is not the failure §Open risks #2 warns about (that
+is about getting an *older* runtime than the compiler needs, which cannot happen
+here).
+
+But it does invalidate a claim in §Open risks #4. "`GCC_VERSION` is the lever
+here — a lower pin narrows the gap to what customers are likely to have" is only
+true of the *code we emit*, not of the `libstdc++.so.6` we ship. Pinning
+`GCC_VERSION=14` still ships a gcc-16 runtime providing `GLIBCXX_3.4.35`+.
+
+For our own tree this is harmless and arguably desirable — validator rule 3
+wants the C++ runtime resolving in-tree, and a newer one satisfies strictly more.
+It matters only for the customer-compiles-later seam, where the honest statement
+is: the supported path is building inside the template, and the shipped
+`libstdc++.so.6` is conda-forge's current, not a function of `GCC_VERSION`.
+`validate.sh` should record both versions in `stack-manifest.json` so the pair is
+visible rather than assumed.
+
+**A14 — `Dockerfile.builder` could not build on `almalinux:9`.** It named a
+fixed package list including `curl`; almalinux:9 ships `curl-minimal`, and
+`dnf install curl` is a package *conflict*, not a no-op:
+
+```
+package curl-minimal-7.76.1-40.el9.aarch64 from @System conflicts with
+curl provided by curl-7.76.1-40.el9.aarch64 from baseos
+```
+
+Fixed by probing for each *command* and installing only what is genuinely
+missing. That is also the more honest form of the minimal-host claim this file
+is supposed to embody: the build log now prints exactly what each base image
+lacked, which is the number worth knowing, and `--allowerasing` — which would
+have "fixed" it by installing *more* than needed — is not used.

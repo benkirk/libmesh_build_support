@@ -8,6 +8,7 @@ set -euo pipefail
 : "${CONDA_HOME:?}" "${STACK:?}" "${TARGET_PLATFORM:?}"
 : "${GLIBC_FLOOR:?}" "${GCC_VERSION:?}" "${BLAS_PROVIDER:?}"
 : "${MPI_FAMILY:?}" "${MPI_VERSION:?}" "${MPI_PROVIDER:?}"
+: "${HDF5_VERSION:?}" "${HDF5_PARALLEL:?}"
 TOPDIR="${TOPDIR:-$PWD}"
 
 case "${TARGET_PLATFORM}" in
@@ -51,7 +52,10 @@ CONDA="${CONDA_HOME}/bin/conda"
 #-------------------------------------------------------------------------------
 # Create the env at $STACK.  Prefer a checked-in explicit lock; fall back to
 # solving from the yml so a fresh platform is not blocked on a lock existing.
-lock="${TOPDIR}/conda/lock/${ctag}-${BLAS_PROVIDER}-${MPI_FAMILY}.lock"
+# HDF5_PARALLEL changes the solve, so it has to be part of the lock identity --
+# otherwise a serial lock would silently satisfy a parallel request.
+case "${HDF5_PARALLEL}" in yes) h5tag=hdf5par ;; *) h5tag=hdf5ser ;; esac
+lock="${TOPDIR}/conda/lock/${ctag}-${BLAS_PROVIDER}-${MPI_FAMILY}-${h5tag}.lock"
 
 if [ -s "${lock}" ]; then
   echo "creating ${STACK} from lock ${lock##*/}"
@@ -81,7 +85,23 @@ else
   if [ "${MPI_PROVIDER}" = conda ]; then
     specs+=( "${MPI_FAMILY}=${MPI_VERSION}" )
   fi
-  specs+=( hdf5 zlib )
+
+  #  - never take a bare 'hdf5': the feedstock adds +100 to the nompi build
+  #    number ("prioritize nompi via build number"), so an unqualified request
+  #    resolves to serial by accident rather than by intent, and a migration
+  #    could flip it silently.  Pin the variant explicitly either way.
+  #    Serial is the default: it is what v0 shipped (--disable-parallel), and
+  #    the mpi_* variant makes libhdf5 link libmpi, pulling MPI into the
+  #    closure of everything that touches HDF5.
+  case "${HDF5_PARALLEL}" in
+    no)  specs+=( "hdf5=${HDF5_VERSION}.*=nompi_*" ) ;;
+    yes) specs+=( "hdf5=${HDF5_VERSION}.*=mpi_${MPI_FAMILY}_*" ) ;;
+    *) echo "HDF5_PARALLEL must be yes or no, got: ${HDF5_PARALLEL}" >&2; exit 1 ;;
+  esac
+
+  # git: several PETSc --download-* packages fetch from git rather than a
+  # tarball.  Pruned before packing like the rest of the build tools.
+  specs+=( zlib git )
 
   "${CONDA}" create -y -p "${STACK}" "${specs[@]}"
 fi
