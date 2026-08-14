@@ -66,7 +66,8 @@ pruned before packing; the compiler *runtime* stays, because
 
 Early. The driver, conda bootstrap and container loop work. The relocate,
 prune, slim and validate stages are scaffolded stubs that exit non-zero — see
-the sprint breakdown in the design doc.
+the sprint breakdown in the design doc, and
+[`docs/HANDOFF.md`](docs/HANDOFF.md) for what is verified versus what is not.
 
 ## History
 

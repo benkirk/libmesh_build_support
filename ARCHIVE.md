@@ -13,6 +13,14 @@ git checkout v0-static-stack
 
 It is unmaintained. Bug reports against it will not be acted on.
 
+Its files — `configure.ac`, `autogen.sh`, every `Makefile.am`,
+`build_config.sh.in`, `m4/`, `build-aux/`, `rules/`, `utils/`, and the
+per-package `gcc/ cmake/ zlib/ hdf5/ mpich/ openmpi/ petsc/ libmesh/ trilinos/`
+recipe directories — are no longer in the working tree. The one thing worth
+salvaging from them, the empirical version-compatibility notes that lived in
+`utils/versions/*.sh`, has been carried forward into
+[`profiles/README.md`](profiles/README.md).
+
 ## Why it was retired
 
 Fully static builds of this stack stopped being practical:
