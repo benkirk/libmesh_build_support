@@ -1,0 +1,98 @@
+# mk/common.mk -- paths, knobs, and the package-declaration machinery.
+# Included by the top-level Makefile before any package is discovered.
+
+#-------------------------------------------------------------------------------
+# Knobs.  Every one of these is overridable in config.mk or on the command line.
+BUILD_ROOT      ?= $(CURDIR)/_root
+PROFILE         ?= default
+TARGET_PLATFORM ?= linux-64
+GLIBC_FLOOR     ?= 2.28
+GCC_VERSION     ?= 14
+BLAS_PROVIDER   ?= openblas
+MPI_FAMILY      ?= mpich
+MPI_PROVIDER    ?= conda
+MPI_VERSION     ?= 5.0.1
+RPATH_MODE      ?= rpath
+SLIM_PROFILE    ?= devel
+SHIP_PYTHON     ?= no
+SMOKE_RANKS     ?= 4
+SITE_DIRS       ?= site
+DIST_NAME       ?= libmesh-stack
+DIST_VERSION    ?= 0.1.0
+
+#-------------------------------------------------------------------------------
+# Derived paths.  STACK is both the conda env and the install prefix -- there is
+# deliberately no second prefix.  See docs/RELOCATABLE-STACK-PLAN.md.
+STACK       := $(BUILD_ROOT)/stack
+CONDA_HOME  := $(BUILD_ROOT)/.conda
+WORK        := $(BUILD_ROOT)/.work
+STAMPS      := $(WORK)/stamps
+SRC_CACHE   ?= $(WORK)/src
+LOGS        := $(WORK)/logs
+DIST_DIR    ?= $(CURDIR)/dist
+
+CONDA       := $(CONDA_HOME)/bin/conda
+export CONDARC        := $(CONDA_HOME)/condarc
+export CONDA_PKGS_DIRS ?= $(CONDA_HOME)/pkgs
+
+TARBALL := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).tar.gz
+
+#-------------------------------------------------------------------------------
+# Parallelism.  Carried over from the old build_config.sh.in.
+NPROC       := $(shell nproc 2>/dev/null || echo 4)
+MAKE_J_L    := -j $(NPROC) -l $(shell echo $$(( $(NPROC) * 2 )))
+export NPROC
+
+#-------------------------------------------------------------------------------
+# Verbosity.  'make V=1' echoes recipes.
+V ?= 0
+ifeq ($(V),0)
+  Q := @
+  SAY = @printf '  %-9s %s\n'
+else
+  Q :=
+  SAY = @printf '  %-9s %s\n'
+endif
+
+#-------------------------------------------------------------------------------
+# Environment handed to every build.sh.  The contract documented in
+# docs/EXTENDING.md; keep this list and that document in sync.
+PKG_ENV = \
+  STACK='$(STACK)' \
+  WORK='$(WORK)' \
+  SRC_CACHE='$(SRC_CACHE)' \
+  CONDA_HOME='$(CONDA_HOME)' \
+  NPROC='$(NPROC)' \
+  BLAS_PROVIDER='$(BLAS_PROVIDER)' \
+  MPI_FAMILY='$(MPI_FAMILY)' \
+  RPATH_MODE='$(RPATH_MODE)' \
+  TOPDIR='$(CURDIR)'
+
+#-------------------------------------------------------------------------------
+# declare_pkg -- called at the end of each pkgs/<name>/pkg.mk.  Snapshots the
+# generic PKG_* variables into namespaced ones so many pkg.mk files can be
+# included without clobbering each other, then clears them for the next include.
+define declare_pkg
+PKGS                    += $(PKG_NAME)
+PKG_VERSION_$(PKG_NAME) := $(PKG_VERSION)
+PKG_DEPS_$(PKG_NAME)    := $(PKG_DEPS)
+PKG_URL_$(PKG_NAME)     := $(PKG_URL)
+PKG_DIR_$(PKG_NAME)     := $(pkg_dir)
+PKG_NAME    :=
+PKG_VERSION :=
+PKG_DEPS    :=
+PKG_URL     :=
+endef
+
+#-------------------------------------------------------------------------------
+# run_hooks -- executes hooks/<stage>/*.sh in sorted order, if any exist.
+# Customers inject here without editing tracked files.
+define run_hooks
+	$(Q)if [ -d '$(CURDIR)/hooks/$(1)' ]; then \
+	  for h in $(CURDIR)/hooks/$(1)/*.sh; do \
+	    [ -e "$$h" ] || continue; \
+	    printf '  %-9s %s\n' HOOK "$(1)/$$(basename $$h)"; \
+	    env $(PKG_ENV) bash "$$h" || exit 1; \
+	  done; \
+	fi
+endef

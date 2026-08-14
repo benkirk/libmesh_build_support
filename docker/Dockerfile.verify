@@ -1,0 +1,17 @@
+# The verify image.
+#
+# Deliberately emptier than the builder: no compiler, no make, no dev packages.
+# It receives only the tarball and must be able to unpack and RUN it.  Using a
+# different -- and poorer -- image than the one that built the stack is what
+# makes distcheck's guarantee structural instead of assumed.
+ARG BASE_IMAGE=almalinux:9
+FROM ${BASE_IMAGE}
+
+RUN if   command -v dnf     >/dev/null 2>&1; then dnf -y install tar && dnf clean all; \
+    elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive install tar && zypper clean -a; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+      apt-get update && apt-get install -y --no-install-recommends tar && rm -rf /var/lib/apt/lists/*; \
+    else echo "unsupported base image" >&2; exit 1; fi
+
+WORKDIR /verify
+CMD ["/bin/bash"]

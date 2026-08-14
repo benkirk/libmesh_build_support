@@ -1,0 +1,47 @@
+# Packages removed from the redistributable before packing, by conda-meta file
+# list rather than path globbing.  This file is where "what ships" is decided.
+#
+# One line per conda package NAME (no version).  Lines are matched exactly.
+# '#' comments and blank lines ignored.  A '*' suffix globs.
+#
+# CRITICAL: drop the compilers, keep the compiler RUNTIME.  Removing
+# libgcc/libstdcxx/libgfortran here would make validate.sh fail by
+# construction -- libstdc++.so.6 and libgcc_s.so.1 must resolve inside the tree.
+
+# --- toolchain ---------------------------------------------------------------
+gcc_*
+gxx_*
+gfortran_*
+gcc_impl_*
+gxx_impl_*
+gfortran_impl_*
+binutils
+binutils_*
+ld_impl_*
+sysroot_*
+kernel-headers_*
+libgcc-devel_*
+libstdcxx-devel_*
+libgfortran-devel_*
+libsanitizer
+c-compiler
+cxx-compiler
+fortran-compiler
+
+# --- build tools -------------------------------------------------------------
+cmake
+ninja
+pkg-config
+patchelf
+
+# --- python stack: removed only when SHIP_PYTHON=no (see relocate/prune.sh) ---
+#@python-only
+python
+python_abi
+pip
+setuptools
+wheel
+tk
+libsqlite
+readline
+ncurses
