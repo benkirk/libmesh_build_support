@@ -3,9 +3,9 @@
 # in the old build_config.sh.in, minus the autoconf substitution that baked
 # absolute paths into everything.
 #
-# Provided by mk/pkg.mk: STACK WORK SRC_CACHE CONDA_HOME NPROC BLAS_PROVIDER
-#                        MPI_FAMILY RPATH_MODE TOPDIR
-#                        PKG_NAME PKG_VERSION PKG_URL PKG_DIR
+# Provided by mk/pkg.mk: STACK WORK SRC_CACHE CONDA_HOME NPROC MAKE_J_L
+#                        TARGET_PLATFORM BLAS_PROVIDER MPI_FAMILY RPATH_MODE
+#                        TOPDIR PKG_NAME PKG_VERSION PKG_URL PKG_DIR
 
 set -euo pipefail
 
@@ -14,6 +14,9 @@ set -euo pipefail
 SRC_CACHE="${SRC_CACHE:-${WORK}/src}"
 BUILD_TMP="${WORK}/build/${PKG_NAME}-${PKG_VERSION}"
 NPROC="${NPROC:-4}"
+# Prefer MAKE_J_L over a bare -j: it carries the -l load cap, which is what
+# keeps a shared build host usable.
+MAKE_J_L="${MAKE_J_L:--j ${NPROC}}"
 
 mkdir -p "${SRC_CACHE}" "${BUILD_TMP}"
 
@@ -22,6 +25,19 @@ log () { printf '=== %s: %s\n' "${PKG_NAME}" "$*"; }
 require () {
   for c in "$@"; do
     command -v "$c" >/dev/null 2>&1 || { echo "missing required command: $c" >&2; exit 1; }
+  done
+}
+
+# Dump the build environment into the package log.  Carried over from the v0
+# build_config.sh.in, where it repeatedly earned its keep: when a build fails
+# three hours in, the log is all you have, and "what was CC actually set to"
+# is the first question.  Call it right after activate_toolchain.
+list_build_env () {
+  log "build environment"
+  printenv | sort -u | grep -Ev '_git|_ModuleTable|^__|^LS_COLORS='
+  log "toolchain"
+  for c in "${CC:-cc}" "${CXX:-c++}" "${FC:-gfortran}"; do
+    command -v "$c" >/dev/null 2>&1 && "$c" --version 2>&1 | head -1
   done
 }
 

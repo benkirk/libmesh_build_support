@@ -39,6 +39,8 @@ TARBALL := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PR
 
 #-------------------------------------------------------------------------------
 # Parallelism.  Carried over from the old build_config.sh.in.
+# The -l load cap is carried over from the old build_config.sh.in and matters
+# on shared build hosts: -j alone will happily oversubscribe a busy machine.
 NPROC       := $(shell nproc 2>/dev/null || echo 4)
 MAKE_J_L    := -j $(NPROC) -l $(shell echo $$(( $(NPROC) * 2 )))
 export NPROC
@@ -63,6 +65,8 @@ PKG_ENV = \
   SRC_CACHE='$(SRC_CACHE)' \
   CONDA_HOME='$(CONDA_HOME)' \
   NPROC='$(NPROC)' \
+  MAKE_J_L='$(MAKE_J_L)' \
+  TARGET_PLATFORM='$(TARGET_PLATFORM)' \
   BLAS_PROVIDER='$(BLAS_PROVIDER)' \
   MPI_FAMILY='$(MPI_FAMILY)' \
   RPATH_MODE='$(RPATH_MODE)' \
@@ -78,10 +82,12 @@ PKG_VERSION_$(PKG_NAME) := $(PKG_VERSION)
 PKG_DEPS_$(PKG_NAME)    := $(PKG_DEPS)
 PKG_URL_$(PKG_NAME)     := $(PKG_URL)
 PKG_DIR_$(PKG_NAME)     := $(pkg_dir)
+PKG_STAGE_$(PKG_NAME)   := $(or $(PKG_STAGE),build)
 PKG_NAME    :=
 PKG_VERSION :=
 PKG_DEPS    :=
 PKG_URL     :=
+PKG_STAGE   :=
 endef
 
 #-------------------------------------------------------------------------------

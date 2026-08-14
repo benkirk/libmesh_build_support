@@ -58,7 +58,7 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 ## build: step 2 -- build the source packages into the same prefix
 build: $(STAMPS)/build.stamp
 $(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
-                       $(foreach p,$(PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
+                       $(foreach p,$(BUILD_PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
 	$(call run_hooks,post-build)
 	$(Q)touch $@
 
@@ -167,7 +167,8 @@ print-config:
 	  MPI_VERSION '$(MPI_VERSION)' RPATH_MODE '$(RPATH_MODE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
-	  PACKAGES '$(PKGS)' TARBALL '$(TARBALL)'
+	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \
+	  TARBALL '$(TARBALL)'
 
 ## clean: remove build stamps and logs, keep the conda env and caches
 clean:
