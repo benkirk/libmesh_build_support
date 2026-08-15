@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# PETSc.  Ported from the v0 static stack:  git show v0-static-stack:petsc/build.sh
+#
+# The option set is deliberately v0's, not a fresh opinion about what PETSc
+# ought to enable.  Those flags are what this stack has shipped and what libMesh
+# downstream expects; adding to them is a separate decision from making the
+# stack relocatable.  Three things changed, each forced by the new design:
+#
+#   1. --with-shared-libraries=1.  The entire point of the rewrite.
+#   2. BLAS/LAPACK come from conda instead of --download-fblaslapack.  v0 built
+#      its own reference BLAS (or scavenged the host's /lib64 static one); we
+#      have a tuned OpenBLAS in the prefix already, and shipping two BLAS
+#      implementations in one tree is how you get subtly wrong answers.
+#   3. configure.log is kept under $WORK/logs rather than copied into the
+#      install prefix -- same repeatability, without putting a build artifact
+#      in the tarball.
+#
+# Everything else -- the --download- TPL set, the unset prelude, the glob-cd,
+# -g -O2 -- is carried across as-is.
+. "${TOPDIR}/lib/build_common.sh"
+
+activate_toolchain
+list_build_env
+require curl tar make
+
+download_src "${PKG_URL}"
+
+# The trailing glob is v0's and is load-bearing: asking for '3.13' downloads a
+# tarball that unpacks to '3.13.6'.
+cd "${BUILD_TMP}"/${PKG_NAME}-${PKG_VERSION}* && log "building in $(pwd)"
+
+# v0's prelude.  PETSc's configure takes its compilers from --with-cc and
+# friends and objects to being told twice; PETSC_DIR/PETSC_ARCH leaking in from
+# the environment is a classic way to build against the wrong tree.
+#
+# LDFLAGS and CPPFLAGS are unset for the same reason, and they are OURS --
+# activate_toolchain sets them a few lines above.  PETSc records the flags it
+# was configured with and passes them to every --download- package; an
+# -I/-L into the prefix confuses TPL detection into finding headers it was
+# meant to build.  The rpath they carried is not lost: relocate/patchelf.sh
+# rewrites every rpath in the tree afterwards regardless.
+unset CC CXX FC F77 LDFLAGS CPPFLAGS PETSC_DIR PETSC_ARCH
+
+case "${BLAS_PROVIDER}" in
+  mkl)      blaslapack=( "--with-blaslapack-dir=${STACK}" ) ;;
+  *)        blaslapack=( "--with-blaslapack-lib=${STACK}/lib/libopenblas.so" ) ;;
+esac
+
+# Note there is no --with-hdf5 here.  v0's PETSc had none either -- HDF5 enters
+# the stack through libMesh, which is where the mesh I/O actually lives.
+#
+# The two additions to v0's "-g -O2" are compiler-compatibility flags, not
+# choices about how PETSc is built.  Both restore behaviour that newer GCC
+# changed out from under the pinned TPL sources:
+#
+#   -Wno-implicit-function-declaration  GCC 14 promoted implicit declarations
+#     from a warning to an error.  ScaLAPACK's BLACS is pre-C99 and is full of
+#     them (BI_imvcopy, BI_TransDist, ...), so --download-scalapack fails to
+#     compile outright.  Measured, not anticipated.
+#   -fallow-argument-mismatch  the gfortran >= 10 counterpart, for legacy
+#     Fortran that passes mismatched types to MPI routines.
+#
+# These reach every --download- package, which is the point: PETSc passes its
+# flags down to each TPL's own build system, and the TPLs are the old code.
+python3 ./configure \
+    --with-debugging=0 --with-shared-libraries=1 \
+    --with-ssl=0 \
+    --with-szlib=0 \
+    --with-spooles=1 --download-spooles=yes \
+    --with-ml=1 --download-ml=yes \
+    --with-suitesparse=1 --download-suitesparse=yes \
+    --with-superlu=1 --download-superlu=yes \
+    --with-scalapack=1 --download-scalapack=yes \
+    "${blaslapack[@]}" --with-x=0 \
+    --with-hypre=1 --download-hypre=yes \
+    --prefix="${STACK}" \
+    --with-cc="$(command -v mpicc)" \
+    --with-cxx="$(command -v mpicxx)" \
+    --with-fc="$(command -v mpif90)" \
+    --CFLAGS="-g -O2 -Wno-implicit-function-declaration" \
+    --CXXFLAGS="-g -O2" \
+    --FFLAGS="-g -O2 -fallow-argument-mismatch"
+
+make PETSC_DIR="$(pwd)" all install
+
+# Kept for repeatability and for the next person debugging a TPL, as in v0 --
+# but out of the prefix, since it is a record of the build, not part of it.
+[ -f configure.log ] && cp configure.log "${WORK}/logs/petsc-configure.log"
+
+clean_build_tmp
+log "done"

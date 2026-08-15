@@ -69,7 +69,7 @@ ok   () { echo "  ok    $*"; }
 # stages.  Checks that are properties of the final dependency closure are
 # advisory until the closure is final.
 soft () {
-  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$@ [advisory: pre-slim]"; fi
+  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$* [advisory: pre-slim]"; fi
 }
 
 echo "=== validate (${MODE}, stage=${STAGE}) ${ROOT}"
@@ -98,6 +98,54 @@ if [ -n "${la}" ]; then
   echo "${la}" | sed 's/^/          /'
 else
   ok "no .la files"
+fi
+
+#------------------------------------------------------------------------------
+# The rewritten build-integration files must RESOLVE, not merely stop naming the
+# build prefix.
+#
+# This check exists because the textual one above passed while the answer was
+# wrong.  relocate/fixup-text.sh rewrites libMesh's example Makefiles to locate
+# the prefix from their own position; the first version computed the depth from
+# etc/libmesh/Make.common but that file is also symlinked as <prefix>/Make.common,
+# which is the path the examples actually include -- so it climbed two levels too
+# far and every LIBMESH_DIR resolved to "/opt".  Nothing else would have noticed:
+# the prefix string was gone, so the residue scan was satisfied.
+#
+# Asking make what it got is the only form of this check that means anything,
+# and it costs one process.
+# $(info) fires while make PARSES, so the value is printed before any recipe
+# would run.  The probe still defines its own goal, because this script runs
+# under 'set -o pipefail' and a make that exits non-zero on an unknown target
+# fails the whole pipeline -- which silently produced an empty answer and a
+# confusing "resolves to ''" the first time round.
+#
+# A path containing whitespace is exempt, and that is a real limitation rather
+# than an excuse.  GNU make's path functions are list functions: with the tree
+# at ".../a b/c", $(realpath ...) returns the right string but $(dir ...) and
+# $(abspath ...) split it on the space and return nonsense.  Nothing a makefile
+# can do fixes that -- make cannot represent a filename containing a space.
+#
+# So the ELF side of the artifact works from such a path (the loader has no such
+# problem, and every object here resolves) while the make-based build
+# integration does not.  Say so, once, rather than either failing the whole gate
+# or quietly skipping the check.
+ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
+if [ -f "${ex4mk}" ] && [ "${ROOT}" != "${ROOT%%[[:space:]]*}" ]; then
+  warn "skipping the LIBMESH_DIR probe: this path contains whitespace, which" \
+       "GNU make cannot represent (binaries are unaffected)"
+elif [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
+  probe="$( cd "$(dirname "${ex4mk}")" \
+            && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n__libmesh_probe:\n\t@true\n' \
+               | make -f - -n __libmesh_probe 2>/dev/null )" || probe=''
+  got="$(printf '%s\n' "${probe}" | sed -n 's/^__LMD=//p')"
+  if [ "${got}" = "${ROOT}" ]; then
+    ok "example Makefiles resolve LIBMESH_DIR to the tree they are in"
+  elif [ -z "${got}" ]; then
+    bad "example Makefile probe produced no value for LIBMESH_DIR"
+  else
+    bad "example Makefile resolves LIBMESH_DIR to '${got}', expected '${ROOT}'"
+  fi
 fi
 
 #------------------------------------------------------------------------------
@@ -223,6 +271,77 @@ PY
   [ "${N_OPT}" -eq 0 ] || warn "${N_OPT} optional host-GPU reference(s) (expected; UCX CUDA plugins)"
 
   #----------------------------------------------------------------------------
+  # 6. Instruction-set floor.  Reads the report written during 'relocate', while
+  # objdump was still in the tree, and filters it to the files that survived
+  # pruning -- so one scan serves both stages without re-running.
+  #
+  # This is the one defect that would reach the customer as a SIGILL in the
+  # middle of a run, on a machine we never see, in a library nobody suspected.
+  if [ -s "${ISA_REPORT:-}" ]; then
+    eval "$("${PY}" - "${ISA_REPORT}" "${ROOT}" "${ISA_BASELINE:-x86-64-v2}" <<'ISAPY'
+import json, os, sys
+rep = json.load(open(sys.argv[1]))
+root, baseline = sys.argv[2], sys.argv[3]
+X86 = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
+ARM = ["armv8-a", "armv8.1-a", "armv8.2-a", "armv8-a+sve"]
+levels = ARM if baseline.startswith("armv8") else X86
+DISPATCH = ("libopenblas", "libblas", "liblapack", "libmkl", "libcblas",
+            "libcrypto", "libssl", "libzstd", "libz.", "libz-ng", "libgomp")
+# (library prefix, feature) pairs where the instruction is present but can never
+# execute on hardware lacking it.  Narrower than the DISPATCH list on purpose:
+# it exempts one feature of one library, not the library wholesale.
+#
+# libgcc_s carries the SVE/SME save-restore stubs required by the vector
+# procedure call standard (9 'cntd' occurrences).  They are reached only from
+# code compiled for SVE -- which cannot exist in a process running on a CPU
+# without SVE -- so they are unreachable rather than merely guarded.
+GUARDED = {("libgcc_s", "armv8-a+sve")}
+def rank(f):
+    return levels.index(f) if f in levels else -1
+base = rank(baseline)
+over, dispatched, scanned = [], [], 0
+for rel, info in rep.get("files", {}).items():
+    if not os.path.exists(os.path.join(root, rel)):
+        continue                       # pruned since the scan; not our problem
+    scanned += 1
+    feats = info.get("features", [])
+    worst = max(feats, key=rank) if feats else None
+    if worst is None or rank(worst) <= base:
+        continue
+    entry = {"file": rel, "isa": worst}
+    bn = os.path.basename(rel)
+    if info.get("cpuid_dispatch") or bn.startswith(DISPATCH) or any(
+            bn.startswith(lib) and worst == feat for lib, feat in GUARDED):
+        dispatched.append(entry)
+    else:
+        over.append(entry)
+print("ISA_SCANNED=%d" % scanned)
+print("ISA_OVER=%d" % len(over))
+print("ISA_DISPATCH=%d" % len(dispatched))
+print("ISA_SAMPLE=" + json.dumps(
+    "\n".join("          %s: %s" % (e["file"], e["isa"]) for e in over[:12])))
+ISAPY
+)"
+    if [ "${ISA_OVER}" -eq 0 ]; then
+      ok "all ${ISA_SCANNED} objects within ISA baseline ${ISA_BASELINE:-x86-64-v2}"
+    else
+      # Advisory pre-slim, like the other closure properties: nearly every hit
+      # at that point is in the sysroot glibc or the compiler binaries, which
+      # prune removes.  Fatal once the tree is final.
+      soft "${ISA_OVER} object(s) exceed ISA baseline ${ISA_BASELINE:-x86-64-v2} -- these SIGILL on older CPUs:"
+      printf '%b\n' "${ISA_SAMPLE}"
+    fi
+    # Runtime-dispatch libraries legitimately carry higher kernels behind a
+    # CPUID check.  Reported, never fatal -- flagging them would be flagging
+    # correct behaviour, on precisely the libraries where a hit is expected.
+    [ "${ISA_DISPATCH}" -eq 0 ] || \
+      warn "${ISA_DISPATCH} object(s) above baseline but carrying CPUID dispatch (expected: OpenBLAS, libgfortran matmul, MPICH yaksa kernels)"
+  else
+    warn "no ISA scan report at ${ISA_REPORT:-<unset>}; instruction-set floor NOT checked"
+  fi
+
+
+  #----------------------------------------------------------------------------
   # The manifest: what this artifact actually is.
   mkdir -p "${ROOT}/etc"
   "${PY}" - "${ROOT}" "${GLIBC_MEASURED}" "${GLIBC_FLOOR}" <<'PY'
@@ -259,6 +378,7 @@ man = {
     # not the same thing and the difference is the whole point of A4.
     "glibc_floor_requested": floor,
     "glibc_floor_measured": measured,
+    "isa_baseline": os.environ.get("ISA_BASELINE"),
     # GCC_VERSION pins the compiler; conda-forge ships its newest libstdc++
     # regardless, so the runtime version is recorded separately.  See A13.
     "gcc_version_requested": os.environ.get("GCC_VERSION"),

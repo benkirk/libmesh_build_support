@@ -5,3 +5,8 @@ config.mk
 _root/
 dist/
 site/
+
+# importlib byproduct of wrappers/selftest.sh loading relocate/isa-scan.py
+__pycache__/
+# logs and reports the CI build job copies out of the build-root volume
+ci-diag/
