@@ -26,6 +26,13 @@ on:
           discovered to be broken on the day it is wanted.
         type: boolean
         default: false
+      profile_isa_scan:
+        description: >
+          Measure where the ISA scan spends its 20 minutes on x86-64 — objdump
+          versus Python, threads versus processes.  Adds minutes to the build
+          and changes nothing about what the gate reports.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,3 +61,4 @@ jobs:
       # Empty on push and pull_request, where the inputs context does not exist,
       # so || supplies the default that both of those want anyway.
       aggressive_sweep: ${{ inputs.aggressive_sweep || false }}
+      profile_isa_scan: ${{ inputs.profile_isa_scan || false }}

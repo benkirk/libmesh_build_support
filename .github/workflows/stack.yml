@@ -66,6 +66,15 @@ on:
           scan is 20 on x86-64.
         type: number
         default: 90
+      profile_isa_scan:
+        description: >
+          Between 'make build' and 'make all', measure where relocate/
+          isa-scan.py spends its time -- objdump versus Python, threads versus
+          processes.  Off by default; it re-runs the scan several times and adds
+          minutes.  Measures only: nothing it does can change what the gate
+          reports.
+        type: boolean
+        default: false
       free_runner_space:
         description: >
           Run the disk-reclaim action before building.  It self-guards and is a
@@ -306,6 +315,29 @@ jobs:
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
           build make build
+
+      # Here and nowhere else.  'make all' runs relocate (which strips), slim
+      # (which trims) and prune (which removes binutils, so there is no objdump
+      # left at all) -- the unstripped tree the scanner actually reads exists
+      # only in this window.
+      - name: Profile the ISA scan
+        if: inputs.profile_isa_scan
+        continue-on-error: true
+        working-directory: docker
+        run: |
+          docker compose run --rm -T build bash -c '
+            mkdir -p /src/ci-diag
+            "$BUILD_ROOT/.conda/bin/python" relocate/isa-bench.py \
+              --root "$BUILD_ROOT/stack" \
+              --json /src/ci-diag/isa-bench.json
+          ' | tee "${RUNNER_TEMP}/isa-bench.txt"
+          {
+            echo "### ISA scan profile — ${CONFIG}"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/isa-bench.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: make all
         id: make_all
