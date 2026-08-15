@@ -56,7 +56,7 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 	  GCC_VERSION='$(GCC_VERSION)' MPI_VERSION='$(MPI_VERSION)' \
 	  MPI_PROVIDER='$(MPI_PROVIDER)' \
 	  HDF5_VERSION='$(HDF5_VERSION)' HDF5_PARALLEL='$(HDF5_PARALLEL)' \
-	  IGNORE_LOCK='$(IGNORE_LOCK)' \
+	  IGNORE_LOCK='$(IGNORE_LOCK)' CONDA_RECREATE='$(CONDA_RECREATE)' \
 	  bash conda/bootstrap.sh
 	$(call run_hooks,post-conda)
 	$(Q)touch $@

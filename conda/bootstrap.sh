@@ -71,6 +71,35 @@ CONDA="${CONDA_HOME}/bin/conda"
 case "${HDF5_PARALLEL}" in yes) h5tag=hdf5par ;; *) h5tag=hdf5ser ;; esac
 lock="${TOPDIR}/conda/lock/${ctag}-${BLAS_PROVIDER}-${MPI_FAMILY}-${h5tag}.lock"
 
+#-------------------------------------------------------------------------------
+# The prefix is SEALED once source builds have installed into it.
+#
+# 'conda create -p $STACK' does not ask whether the prefix already holds
+# anything -- it recreates it, and everything a source build put there is gone.
+# This is not hypothetical and it is not obscure: conda.stamp depends on THIS
+# FILE, so simply editing bootstrap.sh marks the conda stage out of date, and
+# the next 'make build' silently destroys the tree before rebuilding it.  That
+# is how a completed PETSc install -- 8510 files, twenty-five minutes -- was
+# lost while adding one package to the spec list.
+#
+# So: an existing env is left alone.  Re-provisioning is a deliberate act, and
+# when there are source installs to lose it has to be spelled out.
+if [ -d "${STACK}/conda-meta" ]; then
+  if [ "${CONDA_RECREATE:-0}" = 1 ]; then
+    echo "CONDA_RECREATE=1: removing the existing env at ${STACK}"
+    rm -rf "${STACK}"
+  elif [ -s "${STACK}/etc/source-files.txt" ]; then
+    echo "env at ${STACK} is SEALED: $(wc -l < "${STACK}/etc/source-files.txt") path(s)"
+    echo "  were installed there by source builds.  Recreating it would destroy them."
+    echo "  Nothing to do.  To start over: 'make distclean', or CONDA_RECREATE=1."
+    exit 0
+  else
+    echo "env already exists at ${STACK}; leaving it alone"
+    echo "  (CONDA_RECREATE=1 to rebuild it from scratch)"
+    exit 0
+  fi
+fi
+
 # A lock, once checked in, SHADOWS the spec list below -- which is the whole
 # point of a lock, and also a trap worth naming.  Editing the specs while a lock
 # exists changes nothing, silently: the env is still built from the frozen list,
