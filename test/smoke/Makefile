@@ -20,6 +20,13 @@ SMOKE_BIN = $(STACK)/libexec/smoke
 MPICC    ?= $(STACK)/bin/mpicc
 CFLAGS   ?= -O2 -g -Wall
 
+# mpicc already adds -L/-rpath for MPI's own libdir, which happens to be the
+# same directory everything else lives in -- but relying on that would make the
+# link depend on an MPI implementation detail.  Say it outright.  The absolute
+# rpath is correct here and deliberate: relocate/patchelf.sh rewrites every
+# rpath in the tree to $ORIGIN-relative afterwards.
+LDFLAGS  += -L$(STACK)/lib -Wl,-rpath,$(STACK)/lib
+
 # Feature detection, so the example can grow as packages land without the
 # contract changing.  Each block is additive.
 ifneq ($(wildcard $(PETSC_DIR)/include/petscvec.h),)
