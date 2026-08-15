@@ -48,6 +48,8 @@ activate_toolchain () {
   export CONDA_PREFIX="${STACK}"
   export PATH="${STACK}/bin:${PATH}"
   if [ -d "${d}" ]; then
+    # conda generates these per-env; there is nothing in the tree to follow.
+    # shellcheck source=/dev/null
     for s in "${d}"/*.sh; do [ -e "$s" ] && . "$s"; done
   fi
   # Build against the single merged prefix with an absolute rpath; the
