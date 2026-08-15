@@ -179,7 +179,7 @@ jobs:
     # instead it is set LOOSELY, far above any legitimate step budget, and the
     # relationship is asserted at runtime in Runner facts below.  A backstop
     # does not need to be tight; it needs to be beyond every real case.
-    timeout-minutes: 300
+    timeout-minutes: 350
     continue-on-error: ${{ inputs.experimental }}
     env:
       # docker/compose.yaml reads all of these.  Anything compose does not
@@ -215,6 +215,7 @@ jobs:
         env:
           BUILD_TIMEOUT: ${{ inputs.build_timeout_minutes }}
           FINISH_TIMEOUT: ${{ inputs.finish_timeout_minutes }}
+          PROFILE_ISA: ${{ inputs.profile_isa_scan }}
         run: |
           uname -srm
           echo "cpus: $(nproc)"
@@ -230,11 +231,18 @@ jobs:
           # a 30-minute tail for diagnostics, image publish and upload, has to
           # stay under it -- or the job cancellation this whole design exists to
           # avoid comes back.
-          budget=$(( 45 + BUILD_TIMEOUT + FINISH_TIMEOUT + 30 ))
-          echo "budgets: conda 45m, build ${BUILD_TIMEOUT}m, finish ${FINISH_TIMEOUT}m," \
-               "+30m tail = ${budget}m against a 300m job backstop"
-          if [ "${budget}" -ge 300 ]; then
-            echo "::error::step budgets total ${budget}m, which leaves no room under the 300m job backstop"
+          # The ISA bench has to be in this sum, not alongside it.  It is a long
+          # step like any other, and leaving it out is how a 45-minute
+          # measurement turns into a job cancelled at the backstop -- losing the
+          # diagnostics, the tarball and the measurement itself.
+          bench=0
+          if [ "${PROFILE_ISA}" = true ]; then bench=45; fi
+          budget=$(( 45 + BUILD_TIMEOUT + bench + FINISH_TIMEOUT + 30 ))
+          echo "budgets: conda 45m, build ${BUILD_TIMEOUT}m, bench ${bench}m," \
+               "finish ${FINISH_TIMEOUT}m, +30m tail = ${budget}m" \
+               "against a 350m job backstop"
+          if [ "${budget}" -ge 350 ]; then
+            echo "::error::step budgets total ${budget}m, which leaves no room under the 350m job backstop"
             exit 1
           fi
 
@@ -377,6 +385,16 @@ jobs:
         continue-on-error: true
         working-directory: docker
         run: |
+          set -o pipefail
+          # Bounded like every other long step, and counted in the budget
+          # assertion above.  Without both, a 45-minute measurement is how the
+          # job reaches the backstop and loses the diagnostics, the tarball and
+          # the measurement itself.
+          #
+          # $BUILD_ROOT below is the CONTAINER's, so the single quotes are the
+          # point: expanding it here would substitute the runner's empty value.
+          # shellcheck disable=SC2016
+          timeout --verbose --signal=INT --kill-after=2m 45m \
           docker compose run --rm -T build bash -c '
             mkdir -p /src/ci-diag
             "$BUILD_ROOT/.conda/bin/python" relocate/isa-bench.py \
@@ -544,7 +562,7 @@ jobs:
       - name: Publish result sidecar
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: result-build-${{ env.ARTIFACT }}
           path: result/*.json
@@ -667,7 +685,7 @@ jobs:
       - name: Publish result sidecar
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: result-verify-${{ needs.build.outputs.artifact }}-${{ env.SAFE_BASE }}
           path: result/*.json
@@ -691,12 +709,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tolerated rather than required: if every job died before writing a
       # sidecar there is nothing to download, and this job should still render
       # "nothing was collected" instead of failing and hiding that fact too.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: result-*

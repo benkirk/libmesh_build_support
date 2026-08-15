@@ -110,7 +110,9 @@ def main(argv=None):
     ap.add_argument("--root", required=True)
     ap.add_argument("--objdump", default=None)
     ap.add_argument("--jobs", default=None,
-                    help="comma-separated worker counts (default: 1,<ncpu>)")
+                    help="comma-separated worker counts (default: <ncpu> only; "
+                         "pass e.g. 1,2,4 to see how it scales, at the cost of "
+                         "a full scan per count per executor)")
     ap.add_argument("--json", dest="json_out", default=None)
     a = ap.parse_args(argv)
 
@@ -124,9 +126,14 @@ def main(argv=None):
               file=sys.stderr)
         return 1
 
+    # Only the real worker count by default.  Each entry costs a FULL scan per
+    # executor, and on linux-64 a full scan is ~20 minutes -- so the original
+    # default of {1, ncpu} was four scans plus an objdump pass, around 87
+    # minutes, which does not fit in any sane step budget.  The comparison that
+    # decides anything is threads versus processes at the width the gate
+    # actually runs at; jobs=1 is a scaling curve, available on request.
     ncpu = os.cpu_count() or 4
-    counts = ([int(x) for x in a.jobs.split(",")] if a.jobs
-              else sorted({1, ncpu}))
+    counts = ([int(x) for x in a.jobs.split(",")] if a.jobs else [ncpu])
 
     targets = find_targets(root, objdump)
     if not targets:
