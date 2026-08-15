@@ -21,7 +21,12 @@ x-common: &common
   platform: ${PLATFORM:-linux/arm64}
   working_dir: /src
   environment:
-    BUILD_ROOT: /build
+    # Longer than the obvious /build, so path handling gets exercised rather
+    # than being trivially short.  Conda's padded binary prefix slots are 255
+    # bytes wide (measured), so they are not the binding constraint that
+    # amendment A6 originally feared -- but 255 IS a hard ceiling on the
+    # installed path, and validate.sh checks it.
+    BUILD_ROOT: /opt/libmesh-stack-build-root
     CONDA_PKGS_DIRS: /cache/conda-pkgs
     SRC_CACHE: /cache/src
     DIST_DIR: /src/dist
@@ -36,7 +41,7 @@ x-common: &common
     # BUILD_ROOT: named volume, NOT a bind mount. ~2 GB and hundreds of
     # thousands of files -- on macOS a bind mount here is the difference
     # between minutes and hours.
-    - build-root:/build
+    - build-root:/opt/libmesh-stack-build-root
     # Caches survive 'compose down', so re-solves and rebuilds cost no network.
     - conda-pkgs:/cache/conda-pkgs
     - src-cache:/cache/src
@@ -64,18 +69,29 @@ services:
         BASE_IMAGE: ${VERIFY_IMAGE:-${BASE_IMAGE:-almalinux:9}}
     platform: ${PLATFORM:-linux/arm64}
     working_dir: /verify
+    environment:
+      SMOKE_RANKS: ${SMOKE_RANKS:-4}
     volumes:
       - ../dist:/dist:ro
       - ../test:/verify/test:ro
+      - ../relocate:/verify/relocate:ro
+    # Unpack at a different depth, validate with the LOADER ONLY, then run the
+    # prebuilt binaries.  --runtime rather than --full is not a shortcut: this
+    # image has no python and no binutils, which is exactly the point -- it is
+    # the check a customer's machine can actually perform, and it is performed
+    # here on a poorer image than the one that built the tarball.
     command:
       - bash
       - -euc
       - |
         t=$$(ls -1 /dist/*.tar.gz 2>/dev/null | head -1)
         [ -n "$$t" ] || { echo "no tarball in dist/ -- run 'make dist' first" >&2; exit 1; }
-        echo "unpacking $$t at a different path depth"
+        echo "=== verify on $$(. /etc/os-release && echo $$PRETTY_NAME), glibc $$(ldd --version 2>&1 | head -1 | awk '{print $$NF}')"
+        echo "unpacking $$(basename $$t) at a different path depth"
         mkdir -p /verify/a/b/c && tar -xzf "$$t" -C /verify/a/b/c
-        STACK=/verify/a/b/c/stack bash /verify/test/run.sh relocated
+        S=/verify/a/b/c/stack
+        bash /verify/relocate/validate.sh --runtime --stage final "$$S"
+        STACK="$$S" WORK=/tmp/verify-work bash /verify/test/run.sh relocated
 
 volumes:
   build-root:

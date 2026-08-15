@@ -14,8 +14,8 @@
 # are phony and ALWAYS re-run, because a gate you can satisfy by not running
 # it is not a gate.
 
-.PHONY: all conda build test relocate validate slim dist distcheck \
-        help shell clean distclean conda-lock print-config
+.PHONY: all conda wrappers wrappers-check build test relocate validate slim \
+        dist distcheck help shell clean distclean conda-lock print-config
 
 ## all: the whole workflow, conda through distcheck
 all: distcheck
@@ -33,10 +33,15 @@ define do_test
 	$(call run_hooks,post-test)
 endef
 
+# $(1) is the stage label AND the validate stage: 'relocated' reports embedded
+# prefix residue, 'final' treats it as fatal.  See relocate/validate.sh.
 define do_validate
 	$(SAY) VALIDATE '$(1)'
 	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
-	  bash relocate/validate.sh --full '$(STACK)'
+	  GCC_VERSION='$(GCC_VERSION)' MPI_PROVIDER='$(MPI_PROVIDER)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' SLIM_PROFILE='$(SLIM_PROFILE)' \
+	  ISA_BASELINE='$(ISA_BASELINE)' ISA_REPORT='$(WORK)/relocate/isa-scan.json' \
+	  bash relocate/validate.sh --full --stage '$(1)' '$(STACK)'
 endef
 
 #-------------------------------------------------------------------------------
@@ -50,6 +55,8 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 	  TARGET_PLATFORM='$(TARGET_PLATFORM)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
 	  GCC_VERSION='$(GCC_VERSION)' MPI_VERSION='$(MPI_VERSION)' \
 	  MPI_PROVIDER='$(MPI_PROVIDER)' \
+	  HDF5_VERSION='$(HDF5_VERSION)' HDF5_PARALLEL='$(HDF5_PARALLEL)' \
+	  IGNORE_LOCK='$(IGNORE_LOCK)' CONDA_RECREATE='$(CONDA_RECREATE)' \
 	  bash conda/bootstrap.sh
 	$(call run_hooks,post-conda)
 	$(Q)touch $@
@@ -62,9 +69,37 @@ $(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
 	$(call run_hooks,post-build)
 	$(Q)touch $@
 
+#-------------------------------------------------------------------------------
+## wrappers: generate the build-time compiler wrappers that pin the ISA baseline
+wrappers: $(STAMPS)/wrappers.stamp
+$(STAMPS)/wrappers.stamp: $(STAMPS)/conda.stamp \
+                          wrappers/generate.sh wrappers/selftest.sh | $(STAMPS)
+	$(SAY) WRAPPERS '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) WRAPPER_ON_NATIVE='$(WRAPPER_ON_NATIVE)' \
+	  bash wrappers/generate.sh
+# The self-test runs here, in the same recipe that generates them, rather than
+# as a separate phony prerequisite of the build.  A phony gate would make
+# prebuild.stamp perpetually out of date and rebuild every package; running it
+# at generation time covers the only moment the answer can change.
+	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
+	$(Q)touch $@
+
+## wrappers-check: prove the wrappers cap the ISA, by scanning what they emit
+# Always re-runs: it is a gate, and it is seconds, not minutes.
+wrappers-check: $(STAMPS)/wrappers.stamp wrappers/selftest.sh
+	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
+
+#-------------------------------------------------------------------------------
 # pre-build runs once, before any package -- hence its own stamp rather than
 # a hook on build.stamp, which runs after the packages.
-$(STAMPS)/prebuild.stamp: $(STAMPS)/conda.stamp | $(STAMPS)
+#
+# Source builds sit downstream of the wrappers, so no package can be compiled
+# before the injection has been generated and proven.  A wrapper that silently
+# stopped injecting would produce a stack that is wrong in the one way this
+# project exists to prevent, and would look entirely normal doing it.
+$(STAMPS)/prebuild.stamp: $(STAMPS)/wrappers.stamp | $(STAMPS)
 	$(call run_hooks,pre-build)
 	$(Q)touch $@
 $(foreach p,$(PKGS),$(eval $(STAMPS)/$(p).stamp: $(STAMPS)/prebuild.stamp))
@@ -89,17 +124,24 @@ $(STAMPS)/relocate.stamp: $(STAMPS)/test-built.stamp \
 	$(Q)env $(PKG_ENV) bash relocate/patchelf.sh
 	$(SAY) FIXUP 'embedded paths'
 	$(Q)env $(PKG_ENV) BUILD_ROOT='$(BUILD_ROOT)' bash relocate/fixup-text.sh
+# The ISA scan needs objdump, which prune.list removes along with the rest of
+# binutils -- so it runs here, while the toolchain is still in the tree, and
+# writes a report both validate stages read.  Same constraint that forces slim
+# before prune; see A17.
+	$(SAY) ISA-SCAN '$(ISA_BASELINE)'
+	$(Q)"$(CONDA_HOME)/bin/python" relocate/isa-scan.py --root '$(STACK)' \
+	  --out '$(WORK)/relocate/isa-scan.json' --jobs '$(NPROC)'
 	$(call run_hooks,post-relocate)
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
 ## validate: the gate -- no unexpected host dependencies, C++ runtime in-tree
 validate: $(STAMPS)/relocate.stamp relocate/validate.sh
-	$(call do_validate,$(STACK))
+	$(call do_validate,relocated)
 
 # the gate, immediately after relocation
 $(STAMPS)/validate-relocated.stamp: $(STAMPS)/relocate.stamp relocate/validate.sh | $(STAMPS)
-	$(call do_validate,post-relocate)
+	$(call do_validate,relocated)
 	$(Q)touch $@
 
 # step 5: in place again, proving relocation did not break the build tree
@@ -113,18 +155,22 @@ slim: $(STAMPS)/slim.stamp
 $(STAMPS)/slim.stamp: $(STAMPS)/test-relocated.stamp \
                       relocate/prune.sh relocate/slim.sh conda/prune.list | $(STAMPS)
 	$(call run_hooks,pre-slim)
+# slim BEFORE prune, which reverses the plan's order for a concrete reason:
+# 'strip' is provided only by binutils_impl_*, which prune.list removes, and
+# the miniforge base has no strip either.  Pruning first would silently turn
+# stripping into a no-op.  See the header of relocate/slim.sh.
+	$(SAY) SLIM '$(SLIM_PROFILE)'
+	$(Q)env $(PKG_ENV) SLIM_PROFILE='$(SLIM_PROFILE)' bash relocate/slim.sh
 	$(SAY) PRUNE 'conda/prune.list'
 	$(Q)env $(PKG_ENV) SHIP_PYTHON='$(SHIP_PYTHON)' CONDA_HOME='$(CONDA_HOME)' \
 	  bash relocate/prune.sh
-	$(SAY) SLIM '$(SLIM_PROFILE)'
-	$(Q)env $(PKG_ENV) SLIM_PROFILE='$(SLIM_PROFILE)' bash relocate/slim.sh
 	$(call run_hooks,post-slim)
 	$(Q)touch $@
 
 # the gate again, after pruning -- this is the one that catches a prune that
 # took libstdc++.so.6 or libgcc_s.so.1 with it
 $(STAMPS)/validate-slimmed.stamp: $(STAMPS)/slim.stamp relocate/validate.sh | $(STAMPS)
-	$(call do_validate,post-slim)
+	$(call do_validate,final)
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
@@ -142,13 +188,15 @@ distcheck: dist
 	$(SAY) CHECK 'relocating to a different path depth'
 	$(Q)env $(PKG_ENV) TARBALL='$(TARBALL)' BUILD_ROOT='$(BUILD_ROOT)' \
 	  SMOKE_RANKS='$(SMOKE_RANKS)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
+	  ISA_BASELINE='$(ISA_BASELINE)' ISA_REPORT='$(WORK)/relocate/isa-scan.json' \
 	  bash test/distcheck.sh
 
 #-------------------------------------------------------------------------------
 ## conda-lock: regenerate the checked-in explicit lock files
 conda-lock:
 	$(SAY) LOCK 'conda/lock'
-	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' bash conda/lock.sh
+	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
 
 ## shell: an interactive shell with $(STACK)/bin on PATH
 # Deliberately minimal.  Once S4 lands, $(STACK)/activate.sh is the real entry
@@ -164,7 +212,10 @@ print-config:
 	  TARGET_PLATFORM '$(TARGET_PLATFORM)' GLIBC_FLOOR '$(GLIBC_FLOOR)' \
 	  GCC_VERSION '$(GCC_VERSION)' BLAS_PROVIDER '$(BLAS_PROVIDER)' \
 	  MPI_FAMILY '$(MPI_FAMILY)' MPI_PROVIDER '$(MPI_PROVIDER)' \
-	  MPI_VERSION '$(MPI_VERSION)' RPATH_MODE '$(RPATH_MODE)' \
+	  MPI_VERSION '$(MPI_VERSION)' ISA_BASELINE '$(ISA_BASELINE)' \
+	  HDF5_VERSION '$(HDF5_VERSION)' HDF5_PARALLEL '$(HDF5_PARALLEL)' \
+	  RPATH_MODE '$(RPATH_MODE)' \
+	  USE_WRAPPERS '$(USE_WRAPPERS)' WRAPPER_ON_NATIVE '$(WRAPPER_ON_NATIVE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \

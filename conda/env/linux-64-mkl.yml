@@ -1,10 +1,15 @@
-# Reference spec. The authoritative artifact is conda/lock/*.lock, regenerated
-# by 'make conda-lock'. Version pins here are templated by conda/bootstrap.sh
-# from GCC_VERSION / GLIBC_FLOOR / MPI_VERSION.
+# Reference spec.  The authoritative artifact is conda/lock/*.lock, regenerated
+# by 'make conda-lock'.  Version pins here are templated by conda/bootstrap.sh
+# from GCC_VERSION / GLIBC_FLOOR / MPI_VERSION / HDF5_VERSION / HDF5_PARALLEL.
 #
-# Deliberately absent, both measured traps:
+# Three measured traps, all deliberately encoded:
 #   libblas / liblapack  -- the bare metapackages drag in ~560 MB of MKL
 #   mpich-mpicc etc.     -- stale; pin mpich back to 3.2.1 (2017)
+#   bare hdf5            -- the feedstock adds +100 to the nompi build number,
+#                           so an unqualified request resolves to serial by
+#                           accident.  Pin the variant either way.  Serial is
+#                           the default: it is what v0 shipped, and the mpi_*
+#                           variant makes libhdf5 link libmpi.
 name: stack
 channels: [conda-forge]
 dependencies:
@@ -16,11 +21,12 @@ dependencies:
   - ninja
   - make
   - pkg-config
-  - patchelf
+  - patchelf   # see A15: conda-forge has no installable 0.18+
   - python
+  - git
   - mpich=5.0.1
   - mkl
   - mkl-devel
   - blas=*=mkl
-  - hdf5
+  - hdf5=1.14.*=nompi_*
   - zlib

@@ -1,0 +1,325 @@
+# Build the stack once, then validate that same tarball everywhere.  §S7.
+#
+# This is a reusable workflow (workflow_call only) -- ci.yml calls it with the
+# default configuration, nightly.yml calls it with the extended axes.  There is
+# exactly one implementation of "build and verify", parameterised, because two
+# copies would disagree within a month.
+#
+# It is S0b's compose loop scaled out, not a reimplementation of it.  The jobs
+# below run 'docker compose build|run' against docker/compose.yaml, so the
+# builder image, the verify image, the volume layout and the verify command are
+# all the ones a developer exercises locally.  Nothing about the pipeline lives
+# in this file; what lives here is the fan-out.
+#
+#   build   one job.  'make all' -- conda, relocate, validate, slim, dist,
+#           distcheck -- inside the builder image, publishing the tarball.
+#   verify  one job per base image.  Downloads that tarball into dist/ and runs
+#           the compose 'verify' service: unpack at a different depth, validate
+#           with the loader only, run the prebuilt binaries.  No compiler, no
+#           python, no binutils in that image, which is the point.
+#
+# The verify images come from docker/bases.env via docker/bases.sh, so adding a
+# distro to the local loop adds it to CI in the same commit.
+name: stack
+
+on:
+  workflow_call:
+    inputs:
+      target_platform:
+        description: linux-64 or linux-aarch64
+        type: string
+        required: true
+      base_image:
+        description: base image the stack is BUILT on
+        type: string
+        default: almalinux:9
+      blas_provider:
+        type: string
+        default: openblas
+      mpi_family:
+        type: string
+        default: mpich
+      hdf5_parallel:
+        type: string
+        default: 'no'
+      glibc_floor:
+        type: string
+        default: '2.28'
+      gcc_version:
+        type: string
+        default: '14'
+      smoke_ranks:
+        description: MPI ranks the smoke test asserts.  Runners have 4 vCPU.
+        type: string
+        default: '4'
+      ignore_lock:
+        description: >
+          Solve from the spec even where a checked-in lock exists.  The lock is
+          the default, and is what makes an artifact reproducible -- which is
+          also why it can never tell us that conda/env/*.yml has stopped
+          resolving to something that works.  extended.yml asks that weekly.
+        type: boolean
+        default: false
+      refresh_lock:
+        description: >
+          Run 'make conda-lock' right after 'make conda', and publish what it
+          wrote in the diagnostics artifact under lock/.  Right after,
+          deliberately: by the end of 'make all' the env has been slimmed and
+          pruned, and the source builds have installed into it, so a lock taken
+          then would describe the artifact rather than the environment that
+          built it.
+        type: boolean
+        default: false
+      verify_bases:
+        description: >
+          Space-separated verify images, overriding docker/bases.env.  Empty
+          means "all of them", which is what you want.
+        type: string
+        default: ''
+      experimental:
+        description: >
+          Report failures without failing the run.  For configurations that are
+          declared but not yet proven -- see the table in §S7.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  #-----------------------------------------------------------------------------
+  # The verify matrix, read from docker/bases.env rather than written here.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      bases: ${{ steps.bases.outputs.json }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: bases
+        env:
+          BASES: ${{ inputs.verify_bases }}
+        run: |
+          json="$(bash docker/bases.sh --json)"
+          echo "verify images: ${json}"
+          echo "json=${json}" >> "$GITHUB_OUTPUT"
+
+  #-----------------------------------------------------------------------------
+  # Build once.  The tarball this publishes is the only thing the verify jobs
+  # ever see -- exactly as a customer sees only the tarball.
+  build:
+    # linux-aarch64 is a real target, not emulation-for-convenience, so it gets
+    # a native runner.  QEMU would work and would take hours; the ISA scan
+    # disassembles every ELF object and is punishing under emulation.
+    runs-on: ${{ inputs.target_platform == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    # A clean build with PETSc, Trilinos and libMesh measured ~12 min on 12
+    # cores; runners have 4, and conda, the ISA scan and distcheck sit on top of
+    # that.  The ceiling is deliberately well clear of the estimate rather than
+    # close to it: a timeout kills the job before the diagnostics step, so the
+    # one run that most needs its logs is the one that loses them.
+    timeout-minutes: 180
+    continue-on-error: ${{ inputs.experimental }}
+    env:
+      # docker/compose.yaml reads all of these.  Anything compose does not
+      # declare in its 'environment:' block is passed per-run with 'run -e', so
+      # that the compose file stays the local dev loop's file and not CI's.
+      BASE_IMAGE: ${{ inputs.base_image }}
+      PLATFORM: ${{ inputs.target_platform == 'linux-aarch64' && 'linux/arm64' || 'linux/amd64' }}
+      TARGET_PLATFORM: ${{ inputs.target_platform }}
+      BLAS_PROVIDER: ${{ inputs.blas_provider }}
+      MPI_FAMILY: ${{ inputs.mpi_family }}
+      GLIBC_FLOOR: ${{ inputs.glibc_floor }}
+      GCC_VERSION: ${{ inputs.gcc_version }}
+      BUILDKIT_PROGRESS: plain
+      ARTIFACT: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Worth a line in every log: the build root, the conda package cache and
+      # the PETSc/Trilinos build trees together are the reason Docker Desktop
+      # needs 60 GB locally, and a runner that has run short of disk fails in
+      # ways that read like a build bug.
+      - name: Runner facts
+        run: |
+          uname -srm
+          echo "cpus: $(nproc)"
+          free -h | head -2
+          df -h / | tail -1
+          docker version --format 'docker {{.Server.Version}}'
+          docker compose version
+
+      - name: Build the builder image (${{ inputs.base_image }})
+        working-directory: docker
+        run: docker compose build build
+
+      - name: Resolved configuration
+        working-directory: docker
+        run: >
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          build make print-config
+
+      # Split out of 'make all' only when a lock refresh was asked for: the lock
+      # has to be taken while the env is still the build environment.
+      - name: conda + refresh the lock
+        if: inputs.refresh_lock
+        working-directory: docker
+        run: >
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          build make conda conda-lock
+
+      - name: make all
+        working-directory: docker
+        run: >
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          -e SMOKE_RANKS='${{ inputs.smoke_ranks }}'
+          build make all
+
+      # $WORK lives in a named volume, so the logs and the ISA report are not on
+      # the runner's filesystem.  Copy them out through the same service rather
+      # than binding the build root: the named volume is load-bearing for the
+      # macOS loop (see compose.yaml) and CI should not need its own layout.
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        working-directory: docker
+        run: |
+          docker compose run --rm -T build bash -c '
+            mkdir -p /src/ci-diag
+            cp -a "$BUILD_ROOT"/.work/logs      /src/ci-diag/ 2>/dev/null || true
+            cp -a "$BUILD_ROOT"/.work/relocate  /src/ci-diag/ 2>/dev/null || true
+            cp -a /src/conda/lock               /src/ci-diag/ 2>/dev/null || true
+            df -h /                             > /src/ci-diag/df.txt 2>&1 || true
+          '
+
+      # Its own step, not the tail of the one above, because that one can fail
+      # before reaching this -- and then every artifact upload fails too, on a
+      # permission error that says nothing about what actually broke.
+      - name: Make the outputs readable
+        if: always()
+        continue-on-error: true
+        run: |
+          # Everything under dist/ and ci-diag/ was written by root inside the
+          # container; upload-artifact runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" dist ci-diag conda/lock 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        run: |
+          # An unmatched glob expands to itself, so test for the file rather
+          # than for the word.  'if', not '&&': this step runs under 'set -e'
+          # and it has to survive the no-tarball case, which is the one where a
+          # summary is worth the most.
+          set -- dist/*.tar.gz
+          t=''
+          if [ -e "$1" ]; then t="$1"; fi
+          {
+            echo "## ${{ inputs.target_platform }} · ${{ inputs.blas_provider }} · ${{ inputs.mpi_family }}"
+            echo
+            # Report what the env was actually built from, not what was asked
+            # for.  These are not the same thing: bootstrap.sh falls back to
+            # solving when no lock exists for the configuration, and there is
+            # no linux-64 lock (A37).  An earlier version of this line printed
+            # the input and so claimed "from the checked-in lock" on a run that
+            # had solved from scratch.
+            case "${{ inputs.hdf5_parallel }}" in yes) h5=hdf5par ;; *) h5=hdf5ser ;; esac
+            lock="conda/lock/${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-${h5}.lock"
+            if [ "${{ inputs.ignore_lock }}" = true ]; then
+              src="a fresh conda-forge solve (lock ignored on purpose)"
+            elif [ -s "${lock}" ]; then
+              src="\`${lock}\`"
+            else
+              src="a fresh conda-forge solve — no lock exists for this configuration"
+            fi
+            echo "built on \`${{ inputs.base_image }}\`, env from ${src}"
+            echo
+            if [ -n "${t}" ]; then
+              echo "| | |"
+              echo "|---|---|"
+              echo "| tarball | \`$(basename "${t}")\` |"
+              echo "| size | $(du -h "${t}" | cut -f1) |"
+              tar -xzOf "${t}" stack/etc/stack-manifest.json 2>/dev/null > /tmp/man.json || true
+              if [ -s /tmp/man.json ]; then
+                jq -r '
+                  "| packages | \(.package_count) |",
+                  "| glibc floor | requested \(.glibc_floor_requested), measured \(.glibc_floor_measured) |",
+                  "| ISA baseline | \(.isa_baseline) |",
+                  "| libstdc++ | \(.libstdcxx_version) (gcc pinned \(.gcc_version_requested)) |"
+                ' /tmp/man.json
+              fi
+              # Counts, not a verdict: whether a recorded feature is ABOVE the
+              # baseline is validate.sh's call, and it has already been made --
+              # the job would be red otherwise.  The CPUID number is the one
+              # worth watching, since it is the bucket that gets a pass.
+              if [ -s ci-diag/relocate/isa-scan.json ]; then
+                jq -r '"| ELF objects scanned | \(.scanned) |",
+                       "| with ISA features recorded | \([.files[] | select(((.features // []) | length) > 0)] | length) |",
+                       "| CPUID-dispatching | \([.files[] | select(.cpuid_dispatch == true)] | length) |"' \
+                  ci-diag/relocate/isa-scan.json
+              fi
+            else
+              echo "No tarball was produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the tarball
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}-diagnostics
+          path: ci-diag/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  #-----------------------------------------------------------------------------
+  # Consume that one tarball on every base image in docker/bases.env.
+  #
+  # fail-fast is off on purpose.  "It runs on almalinux:9 but not on
+  # opensuse/leap:15" is the single most useful thing this matrix can tell us,
+  # and cancelling the other four the moment one goes red destroys it.
+  verify:
+    needs: [plan, build]
+    runs-on: ${{ inputs.target_platform == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    continue-on-error: ${{ inputs.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ${{ fromJSON(needs.plan.outputs.bases) }}
+    name: verify (${{ matrix.base }})
+    env:
+      VERIFY_IMAGE: ${{ matrix.base }}
+      PLATFORM: ${{ inputs.target_platform == 'linux-aarch64' && 'linux/arm64' || 'linux/amd64' }}
+      SMOKE_RANKS: ${{ inputs.smoke_ranks }}
+      BUILDKIT_PROGRESS: plain
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+          path: dist
+
+      # --build is not optional and not belt-and-braces: without it compose
+      # reuses the image it built last and silently ignores VERIFY_IMAGE, so a
+      # matrix like this one would run five green jobs against one distro.  The
+      # verify service prints the distro and glibc it actually ran on; that line
+      # is the check on this comment being true.
+      - name: Unpack and run on ${{ matrix.base }}
+        working-directory: docker
+        run: docker compose run --rm --build -T verify
