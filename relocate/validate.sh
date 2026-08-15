@@ -119,8 +119,22 @@ fi
 # under 'set -o pipefail' and a make that exits non-zero on an unknown target
 # fails the whole pipeline -- which silently produced an empty answer and a
 # confusing "resolves to ''" the first time round.
+#
+# A path containing whitespace is exempt, and that is a real limitation rather
+# than an excuse.  GNU make's path functions are list functions: with the tree
+# at ".../a b/c", $(realpath ...) returns the right string but $(dir ...) and
+# $(abspath ...) split it on the space and return nonsense.  Nothing a makefile
+# can do fixes that -- make cannot represent a filename containing a space.
+#
+# So the ELF side of the artifact works from such a path (the loader has no such
+# problem, and every object here resolves) while the make-based build
+# integration does not.  Say so, once, rather than either failing the whole gate
+# or quietly skipping the check.
 ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
-if [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
+if [ -f "${ex4mk}" ] && [ "${ROOT}" != "${ROOT%%[[:space:]]*}" ]; then
+  warn "skipping the LIBMESH_DIR probe: this path contains whitespace, which" \
+       "GNU make cannot represent (binaries are unaffected)"
+elif [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
   probe="$( cd "$(dirname "${ex4mk}")" \
             && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n__libmesh_probe:\n\t@true\n' \
                | make -f - -n __libmesh_probe 2>/dev/null )" || probe=''

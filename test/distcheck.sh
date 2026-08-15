@@ -24,8 +24,13 @@ TOPDIR="${TOPDIR:-$PWD}"
 
 # Deliberately deeper than the build path, and named so it is obvious in a
 # stack trace where a leaked absolute path came from.
+#
+# The space in "a b" is deliberate too.  An unquoted "$STACK" or "$prefix"
+# somewhere in a wrapper, a .pc file or a rewritten Makefile survives every test
+# that unpacks into a tidy path and fails the first time a customer puts the
+# stack under "/opt/My Tools/".  It costs one character to check.
 SCRATCH="$(mktemp -d "${DISTCHECK_TMP:-/tmp}/distcheck.XXXXXX")"
-DEEP="${SCRATCH}/relocated/a/b/c"
+DEEP="${SCRATCH}/relocated/a b/c"
 STASH="${STACK}.stashed-by-distcheck"
 
 cleanup () {
@@ -74,5 +79,27 @@ echo "--- run the prebuilt binaries from the relocated tree"
 env STACK="${NEW}" SMOKE_RANKS="${SMOKE_RANKS}" WORK="${SCRATCH}/work" \
     bash "${TOPDIR}/test/run.sh" relocated
 
+#------------------------------------------------------------------------------
+# And again from a READ-ONLY tree.
+#
+# This is how the stack actually gets deployed: unpacked once into a shared
+# location by someone with write access, then used by everyone else. Anything
+# that writes into its own prefix at runtime -- a cache, a log, a lock, a
+# generated config -- works perfectly for whoever unpacked it and fails for
+# every other user, on a machine nobody can reproduce it on.
+#
+# Cheap to check, and only meaningful as a SECOND pass: the first run may have
+# created files that mask the problem, so this must come after everything above.
+echo
+echo "--- run again with the tree made read-only"
+chmod -R a-w "${NEW}"
+ro_rc=0
+env STACK="${NEW}" SMOKE_RANKS="${SMOKE_RANKS}" WORK="${SCRATCH}/work-ro" \
+    bash "${TOPDIR}/test/run.sh" relocated || ro_rc=$?
+# Restore write permission before cleanup, or the trap cannot remove the tree.
+chmod -R u+w "${NEW}"
+[ "${ro_rc}" -eq 0 ] || { echo "the stack does not work from a read-only tree" >&2; exit "${ro_rc}"; }
+
 echo
 echo "=== distcheck OK: built at ${STACK}, ran at ${NEW}"
+echo "    (unpacked under a path containing a space, and run read-only)"
