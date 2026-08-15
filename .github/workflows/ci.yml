@@ -57,7 +57,7 @@ jobs:
       # almalinux:9 because that is what the end-to-end runs in #4 used.  The
       # builder's own glibc barely matters -- conda supplies the compilers and
       # the sysroot pins GLIBC_FLOOR -- but "what we verified" beats "what we
-      # reason should be equivalent".  Varying it is nightly's job.
+      # reason should be equivalent".  Varying it is extended.yml's job.
       base_image: almalinux:9
       # Empty on push and pull_request, where the inputs context does not exist,
       # so || supplies the default that both of those want anyway.

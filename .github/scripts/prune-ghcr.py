@@ -15,19 +15,33 @@ PER CONFIGURATION LINE.  Keeping the 10 newest overall would let a busy
 linux-64 line evict every linux-aarch64 tag, and the aarch64 ones are the
 harder to rebuild.
 
-UNTAGGED VERSIONS ARE NOT GARBAGE HERE, and this is the trap the original
-walks into.  buildx publishes each tag as an index: a manifest list pointing at
-the image manifest and an attestation manifest.  On GHCR those children appear
-as separate, UNTAGGED versions -- verified in a local build, which emitted
+UNTAGGED VERSIONS MAY NOT BE GARBAGE, and whether they are depends on which
+builder pushed the tag -- which is why this does not assume either way.
+
+A buildx driver with provenance enabled publishes a tag as an INDEX: a manifest
+list pointing at the image manifest and an attestation manifest.  On GHCR those
+children appear as separate, UNTAGGED versions, and deleting them
+unconditionally -- as the original does -- removes the children of tags you
+meant to keep and leaves a tag resolving to nothing.  Docker Desktop does this
+locally; the first publish from it emitted
 
     exporting manifest sha256:b572cea...
     exporting attestation manifest sha256:6c19cb2...
     exporting manifest list sha256:66946e2...
 
-Deleting untagged versions unconditionally therefore deletes the children of
-tags you meant to keep, and leaves a tag that resolves to nothing.  So untagged
-pruning is off by default, and when enabled it first walks the retained tags'
-manifests and protects everything they reference.
+The GitHub runner's builder does NOT, and this script's first draft asserted
+otherwise on the strength of that local observation alone.  The images actually
+published from CI are single manifests -- checked against the registry:
+
+    GET /v2/benkirk/libmesh_build_support/devel/manifests/<tag>
+    mediaType: application/vnd.docker.distribution.manifest.v2+json
+    (7 layers, no .manifests[])
+
+So today there are no children to protect and the protection below is a no-op.
+It stays because the distinction is the BUILDER's, not ours: enabling
+provenance, moving to a container-driver buildx, or publishing multi-arch
+indexes would each bring the children back, and none of those would announce
+themselves here.  Untagged pruning is off by default for the same reason.
 
 WHAT IS NOT POSSIBLE: deleting versions nobody has pulled.  The GitHub Packages
 API returns id, name, url, html_url, license, description, created_at,
