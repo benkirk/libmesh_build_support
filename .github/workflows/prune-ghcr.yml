@@ -1,0 +1,80 @@
+# Keep the GHCR namespace from accumulating builder images forever.
+#
+# Unlike prune-runs.yml, which is hygiene on a public repo where storage is
+# free, this one has something real to prune: every push to main that changes
+# conda/ or the build machinery publishes two images per platform, and the tags
+# are content hashes, so nothing ever overwrites anything.  Left alone the
+# namespace grows monotonically.
+#
+# The retention policy, and the two things that make it different from the
+# usual "delete everything untagged, keep the last N", are argued in
+# .github/scripts/prune-ghcr.py.  The short version: N is applied per
+# CONFIGURATION LINE so a busy linux-64 cannot evict linux-aarch64, and
+# untagged versions are left alone by default because buildx publishes each tag
+# as an index whose children are untagged and would be deleted out from under
+# it.
+#
+# Manual runs default to a dry run; the schedule does not.  Deleting published
+# images is not reversible, and a cron that only ever reports what it would
+# have done is a cron that does nothing.
+name: prune ghcr
+
+on:
+  schedule:
+    # 04:37 on the 12th.  Off the hour, and a day off prune-runs.yml, so the
+    # two are not diagnosed as one problem when a month goes wrong.
+    - cron: '37 4 12 * *'
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: Versions to retain per configuration line.
+        type: string
+        default: '10'
+      prune_untagged:
+        description: >
+          Also delete untagged versions, after protecting everything the
+          retained tags reference.  Read the script's docstring first.
+        type: boolean
+        default: false
+      dry_run:
+        description: List what would be deleted, and stop.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: prune-ghcr
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prune
+        env:
+          # The built-in token can delete packages scoped to this repository.
+          # These are published into the USER namespace, where a PAT with
+          # delete:packages may be required instead -- sam-queries reaches for
+          # one for the same reason.  Prefer it when present, fall back
+          # otherwise, and let the dry run be how that gets found out.
+          GH_TOKEN: ${{ secrets.BENKIRK_GITHUB_TOKEN || github.token }}
+          KEEP: ${{ inputs.keep || '10' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          PRUNE_UNTAGGED: ${{ inputs.prune_untagged || false }}
+        run: |
+          # 'if', not '[ x ] && y'.  The default shell here is 'bash -e {0}',
+          # where that idiom is harmless in the middle of a script but makes the
+          # step fail whenever the condition is false AND it happens to be the
+          # last statement -- so it is correct today and one reordering away
+          # from a red step that means nothing.  Verified both halves of that
+          # rather than guessing at it.
+          args=(--keep "${KEEP}")
+          if [ "${DRY_RUN}" = true ]; then args+=(--dry-run); fi
+          if [ "${PRUNE_UNTAGGED}" = true ]; then args+=(--prune-untagged); fi
+          python3 .github/scripts/prune-ghcr.py "${args[@]}"
