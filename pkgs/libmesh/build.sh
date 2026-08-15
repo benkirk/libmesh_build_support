@@ -64,13 +64,18 @@ export PETSC_ARCH=""
 #     NETCDF_INCLUDE="-I\$(top_srcdir)/contrib/netcdf/v4/include"
 #
 # top_srcdir ONLY.  The build tree's include/ -- where the sub-configure writes
-# the netcdf_meta.h it just generated -- is never on the include path.  The
-# tarball also ships a checked-in netcdf_meta.h in that source directory saying
+# the netcdf_meta.h it just generated -- is never on the include path.  And the
+# RELEASE TARBALL ships a netcdf_meta.h in that source directory saying
 #
 #     #define NC_HAS_NC4  0
 #     #define NC_HAS_HDF5 0
 #
-# so exodus always compiles believing netcdf has no HDF5, however netcdf was
+# which disagrees with the same file in git, where both are 1.  'make dist'
+# evidently regenerated it from netcdf_meta.h.in on a machine whose netcdf
+# configured without HDF5.  So this bites tarball builds -- ours, and v0's --
+# and not a git checkout.
+#
+# Either way exodus compiles believing netcdf has no HDF5, however netcdf was
 # actually built.  ex_utils.c gates on '#if !NC_HAS_HDF5', and with
 # --enable-hdf5 libMesh selects EX_NETCDF4|EX_NOCLASSIC for every ExodusII
 # write with no runtime override -- so exodus refuses all of them:

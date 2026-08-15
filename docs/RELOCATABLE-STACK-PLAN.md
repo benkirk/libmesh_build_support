@@ -920,16 +920,24 @@ flags down to each TPL's own build system, and the TPLs are the old code. Both
 restore behaviour a newer compiler changed; neither is a choice about how PETSc
 is built.
 
-**A29 — libMesh's contrib exodus can never write an ExodusII file when built
-with `--enable-hdf5`.** Two defects in the release tarball combine:
+**A29 — a libMesh built from the RELEASE TARBALL with `--enable-hdf5` can never
+write an ExodusII file.** Two things combine:
 
 1. `configure` sets `NETCDF_INCLUDE="-I$(top_srcdir)/contrib/netcdf/v4/include"`
    — **`top_srcdir` only**. The build tree's `include/`, where the netcdf
    sub-configure writes the `netcdf_meta.h` it just generated, is never on the
    include path.
-2. The tarball ships a *checked-in* `netcdf_meta.h` in that source directory,
-   next to the `netcdf_meta.h.in` configure expands, saying `NC_HAS_NC4 0` and
-   `NC_HAS_HDF5 0`.
+2. **The dist tarball ships a `netcdf_meta.h` that disagrees with the one in
+   git.** Git has `NC_HAS_NC4 1` / `NC_HAS_HDF5 1`; the 1.7.9 tarball ships the
+   same file saying `0` / `0`. `make dist` evidently regenerated it from
+   `netcdf_meta.h.in` on a machine whose netcdf configured without HDF5, and
+   shipped that instead.
+
+**This is a tarball defect, not a libMesh source defect** — checked against
+`v1.7.9` in git, where `contrib/netcdf/v4` is a symlink to
+`contrib/netcdf/netcdf-c-4.6.2`. A git checkout has the correct header, so (1)
+is harmless there and exodus works. It bites anyone building from the published
+release, which is what this stack does and what v0 did.
 
 So `contrib/exodus` always compiles believing netcdf has no HDF5, however netcdf
 was actually built — and ours is built with it (`libnetcdf.settings` reports
@@ -946,9 +954,14 @@ dies on output.
 Deleting the stale header does **not** fix it — measured. With `NETCDF_INCLUDE`
 pointing only at `top_srcdir`, the include path has nowhere correct to fall
 through to. The recipe instead copies the sub-configure's *generated*
-`netcdf_meta.h` over the checked-in one after configuring, and refuses to build
-if that file is missing or itself reports no HDF5. Using configure's own answer
-rather than hardcoded values means it stays right if the HDF5 knob changes.
+`netcdf_meta.h` over the shipped one after configuring, and refuses to build if
+that file is missing or itself reports no HDF5. Using configure's own answer
+rather than hardcoded values means it stays right if the HDF5 knob changes —
+and makes the fix a no-op rather than a hazard should the recipe ever be pointed
+at a git checkout, where the header is already correct.
+
+Worth reporting upstream: the tarball's `netcdf_meta.h` is strictly worse than
+the one in the repository it was cut from.
 
 This is worth stating plainly: v0 had the same configuration and the same
 defect, and never knew, because its example checks ran without `|| exit 1`.

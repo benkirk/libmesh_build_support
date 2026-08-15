@@ -83,26 +83,38 @@ run_parallel () {
 # stale netcdf_meta.h in the libMesh tarball (amendment A29).  A test that only
 # checked the solve would have passed while every ExodusII file silently failed
 # to be written.
+#
+# Each dimension writes a DIFFERENT artifact, and naming them individually is
+# the point.  introduction_ex4 sends 1D to GnuPlot and only 2D and 3D to
+# ExodusII, so "at least one .e file exists" is satisfied by the 2D run alone --
+# the 3D write could fail completely and the test would still pass.  Requiring
+# the specific file each run is supposed to produce is barely more code and
+# actually pins down what happened.
 run_ex4 () {
   local label="$1"; shift
-  local dir out
+  local dir out spec opts want
   [ -x "${EX4_BIN}" ] || { echo "--- ex4 skipped: libMesh not in this stack"; return 0; }
   mkdir -p "${WORK:-/tmp}"
   dir="$(mktemp -d "${WORK:-/tmp}/ex4.XXXXXX")"
-  for opts in "-d 1 -n 20" "-d 2 -n 15" "-d 3 -n 6"; do
-    echo "--- introduction_ex4 ${label} ${opts}"
+
+  for spec in "-d 1 -n 20|gnuplot_script" \
+              "-d 2 -n 15|out_2.e" \
+              "-d 3 -n 6|out_3.e"; do
+    # Two statements: bash expands every word of a 'local' before assigning any
+    # of them, so a second initialiser referring to the first gets nothing.
+    opts="${spec%%|*}"
+    want="${spec##*|}"
+    echo "--- introduction_ex4 ${label} ${opts}  -> ${want}"
+    rm -f "${dir:?}/${want}"
     # shellcheck disable=SC2086
     out=$( cd "${dir}" && "$@" "${EX4_BIN}" ${opts} 2>&1 ) \
       || { echo "${out}" | tail -25; fail "introduction_ex4 ${opts} exited non-zero"; }
     grep -q "Error creating ExodusII" <<<"${out}" \
       && { echo "${out}" | tail -15; fail "ex4 could not write its ExodusII output"; }
+    [ -s "${dir}/${want}" ] \
+      || fail "ex4 ${opts} exited 0 but wrote no non-empty ${want}"
+    echo "    ${want}: $(wc -c < "${dir}/${want}") bytes"
   done
-  # The solve is only half of it; assert the output files exist and are not
-  # empty, which is what "the write succeeded" actually means.
-  local n
-  n=$(find "${dir}" -name '*.e' -size +0c | wc -l)
-  [ "${n}" -ge 1 ] || fail "ex4 wrote no non-empty ExodusII output"
-  echo "    ${n} ExodusII file(s) written"
   rm -rf "${dir}"
 }
 
