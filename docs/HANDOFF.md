@@ -92,28 +92,32 @@ with `rm -rf $BUILD_ROOT/stack $BUILD_ROOT/.work && make all`, or
 **Green end to end**, `make conda` through `make distcheck`, with PETSc,
 Trilinos and libMesh built from source:
 
-| | linux-aarch64 (native) | linux-64 (Rosetta) |
+| | linux-aarch64 | linux-64 |
 |---|---|---|
-| shipped tarball | **107 MB** | — (conda-only: 60 MB) |
-| ELF objects | 339 | 305 (conda-only) |
+| shipped tarball | **107 MB** | — |
+| ELF objects | 339 | 341 |
 | source-installed files | 12787 | — |
-| glibc floor measured | 2.27 (pin 2.28) | 2.25 (pin 2.28) |
-| ISA baseline | `armv8.1-a`, **339/339 within** | `x86-64-v2`, 305/305 within |
+| glibc floor measured | 2.27 (pin 2.28) | 2.27 (pin 2.28) |
+| ISA baseline | `armv8.1-a`, **339/339 within** | `x86-64-v2`, **341/341 within** |
 | CPUID-dispatching objects | 3 | 7 |
-| wall clock, clean build | ~12 min (12 cores) | ~4× that under Rosetta |
+| wall clock, clean build | ~12 min (12 cores) | ~20 min on a CI runner |
 
-The x86-64 column predates the source builds; it has been verified only for the
-conda-only stack, and re-running it is the first thing worth doing.
+**Both columns are now the full source stack**, aarch64 measured locally and
+x86-64 measured by the CI matrix — the first thing to run this pipeline on
+x86-64 with PETSc, Trilinos and libMesh in it. No Rosetta run is needed to
+close that gap.
 
 Cross-distro, with solvers: verified on **`almalinux:8` (glibc 2.28, the floor)**
 and **`ubuntu:24.04` (glibc 2.39)** — `validate --runtime` clean, then
 `introduction_ex4` in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary
 in an image with no compiler, no python and no binutils.
 
-**The ISA result is the one to note.** 339/339 within `armv8.1-a` includes
-everything PETSc's six `--download-` TPLs built, each with its own build system.
-Nothing compiled from source exceeded the baseline — which is what the compiler
-wrapper layer exists to guarantee, and the only evidence that it does.
+**The ISA result is the one to note**, and it now holds on both architectures:
+339/339 within `armv8.1-a` and 341/341 within `x86-64-v2`. That includes
+everything PETSc's six `--download-` TPLs built, each with its own build system
+and its own opinions about `-march`. Nothing compiled from source exceeded the
+baseline — which is what the compiler wrapper layer exists to guarantee, and the
+only evidence that it does.
 
 `distcheck` is the claim that matters: tar, move the original **out of its
 path**, unpack at a different directory depth, validate, run 4 MPI ranks from

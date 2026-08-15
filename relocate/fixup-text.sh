@@ -149,11 +149,16 @@ while IFS= read -r f; do
     "\$(__stack_prefix_${nvar})"
   [ "${before}" -gt 0 ] && mk_fixed=$((mk_fixed + 1))
 done < <(
-  find "${STACK}/examples" -name 'Makefile' -type f 2>/dev/null
-  find "${STACK}/lib/petsc/conf" -type f \
-       ! -name '*.py' ! -name 'configure-hash' 2>/dev/null | grep -v '/modules/'
-  find "${STACK}/share/petsc" -name 'gmakefile*' -type f 2>/dev/null
-  ls "${STACK}/etc/libmesh/Make.common" "${STACK}/lib/pkgconfig/Make.common" 2>/dev/null
+  # '|| true' on every generator, for the same reason as the provenance list
+  # below: one non-zero exit inside this subshell drops all the generators after
+  # it.  Here the hazards are the 'grep -v', which exits 1 if it filters
+  # everything out, and the trailing 'ls' of two files that need not exist.
+  find "${STACK}/examples" -name 'Makefile' -type f 2>/dev/null || true
+  { find "${STACK}/lib/petsc/conf" -type f \
+        ! -name '*.py' ! -name 'configure-hash' 2>/dev/null \
+      | grep -v '/modules/'; } || true
+  find "${STACK}/share/petsc" -name 'gmakefile*' -type f 2>/dev/null || true
+  ls "${STACK}/etc/libmesh/Make.common" "${STACK}/lib/pkgconfig/Make.common" 2>/dev/null || true
 )
 
 # NOTE on CMake bracket arguments: TriBITS records the compiler flags it was
@@ -216,12 +221,23 @@ while IFS= read -r f; do
   sed -i -e "s|${STACK}|${NEUTRAL}|g" "$f"
   prov_fixed=$((prov_fixed + 1))
 done < <(
-  find "${STACK}/include" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 2>/dev/null \
-    | xargs -0 -r grep -l "${STACK}" 2>/dev/null
+  # 'grep -rl' rather than 'find | xargs grep -l', and '|| true' on every
+  # generator, because this list is assembled inside a process substitution that
+  # inherits 'set -euo pipefail' -- so ANY generator exiting non-zero kills the
+  # subshell and silently drops every generator after it.
+  #
+  # That is not hypothetical: xargs exits 123 when a grep invocation it spawned
+  # found nothing, and with 4828 headers here xargs always runs several.
+  # Whether the last batch happens to match decides whether this list is
+  # complete.  CI got 13 files where a local run got 18 -- the missing 5 being
+  # exactly these last three generators -- and the only symptom was a validate
+  # failure twenty minutes later naming the files but not the cause.
+  LC_ALL=C grep -rl --include='*.h' --include='*.hpp' \
+       "${STACK}" "${STACK}/include" 2>/dev/null || true
   find "${STACK}/lib/petsc/conf" -type f \
-       \( -name '*.py' -o -name 'configure-hash' \) 2>/dev/null
-  find "${STACK}/lib/petsc/conf/modules" -type f 2>/dev/null
-  ls "${STACK}/lib/libnetcdf.settings" 2>/dev/null
+       \( -name '*.py' -o -name 'configure-hash' \) 2>/dev/null || true
+  find "${STACK}/lib/petsc/conf/modules" -type f 2>/dev/null || true
+  ls "${STACK}/lib/libnetcdf.settings" 2>/dev/null || true
 )
 
 # References to the BUILD TREE -- $BUILD_ROOT/.work and $BUILD_ROOT/.conda --
@@ -267,3 +283,41 @@ echo "fixup: ${pc_fixed} .pc, ${sh_fixed} wrappers, ${mk_fixed} make, ${cm_fixed
      "${prov_fixed} provenance, ${skipped} already done, ${la_removed} .la removed"
 echo "fixup: residue -> ${REPORT}"
 awk '{print $1}' "${REPORT}" | sort | uniq -c | sed 's/^/  /'
+
+#------------------------------------------------------------------------------
+# Did the passes above actually cover what they claim to cover?
+#
+# Every family this script targets is enumerated again and checked.  That is
+# nearly free, and it is the difference between "this file was never processed"
+# reported HERE, naming the generator, and the same fact surfacing as a validate
+# failure twenty minutes and two build stages later -- which is exactly how the
+# silently-truncated work list was found, by CI, after it had escaped repeated
+# local runs.
+#
+# Note this can only catch a file that was MISSED.  It cannot catch a file that
+# was rewritten to the wrong value; that is what validate.sh's LIBMESH_DIR probe
+# is for.  Both failure modes have now happened.
+missed=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  if LC_ALL=C grep -qI . "$f" 2>/dev/null && LC_ALL=C grep -q "${STACK}" "$f" 2>/dev/null; then
+    echo "fixup: MISSED ${f#"${STACK}"/}" >&2
+    missed=$((missed + 1))
+  fi
+done < <(
+  find "${STACK}/examples" -name 'Makefile' -type f 2>/dev/null || true
+  find "${STACK}/lib/petsc/conf" -type f 2>/dev/null || true
+  find "${STACK}/share/petsc" -name 'gmakefile*' -type f 2>/dev/null || true
+  find "${STACK}/lib" -name '*.cmake' -type f 2>/dev/null || true
+  find "${STACK}/lib" -name '*.pc' -type f 2>/dev/null || true
+  LC_ALL=C grep -rl --include='*.h' --include='*.hpp' \
+       "${STACK}" "${STACK}/include" 2>/dev/null || true
+  ls "${STACK}/etc/libmesh/Make.common" "${STACK}/lib/pkgconfig/Make.common" \
+     "${STACK}/lib/libnetcdf.settings" 2>/dev/null || true
+)
+if [ "${missed}" -gt 0 ]; then
+  echo "fixup: ${missed} targeted file(s) still name the build prefix -- a" \
+       "generator above produced an incomplete list" >&2
+  exit 1
+fi
+echo "fixup: all targeted families verified clean"
