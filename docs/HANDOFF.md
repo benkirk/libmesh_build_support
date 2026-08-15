@@ -11,16 +11,17 @@ Everything you need to pick this up on a Mac. Written after landing **S0**
 
 **`make all` is green end to end on native `linux-aarch64`.** The conda
 environment **is** the redistributable prefix; it is relocated with
-`$ORIGIN` rpaths, pruned from 1.6 G to a **60 MB** tarball, and `distcheck`
-proves the claim: tar, move the original out of its path, unpack at a different
-directory depth, validate, run 4 MPI ranks from there.
+`$ORIGIN` rpaths, pruned to a **107 MB** tarball, and `distcheck` proves the
+claim: tar, move the original out of its path, unpack at a different directory
+depth, validate, and run there.
 
 Verified across distros, which is the part that matters — built on
 `almalinux:9`, then unpacked and run on `ubuntu:24.04` (glibc 2.39) **and on
-`almalinux:8` (glibc 2.28, the declared floor)**.
+`almalinux:8` (glibc 2.28, the declared floor)**, with the full solver stack
+running `introduction_ex4` on both.
 
-Still to come: the PETSc / libMesh / Trilinos recipes, and the real smoke
-example.
+PETSc 3.20.5, Trilinos 14-4-0 and libMesh 1.7.9 are built from source into that
+same prefix, and the smoke harness ends at libMesh's `introduction_ex4`.
 
 ## Get running on the Mac
 
@@ -88,16 +89,31 @@ with `rm -rf $BUILD_ROOT/stack $BUILD_ROOT/.work && make all`, or
 
 ## What is verified, and what is not
 
-**Green end to end on BOTH platforms**, `make conda` through `make distcheck`:
+**Green end to end**, `make conda` through `make distcheck`, with PETSc,
+Trilinos and libMesh built from source:
 
 | | linux-aarch64 (native) | linux-64 (Rosetta) |
 |---|---|---|
-| env as solved | 1.6 G | 1.6 G |
-| shipped tarball | **60 MB** | — |
-| ELF objects | 302 | 305 |
-| glibc floor measured | 2.25 (pin 2.28) | 2.25 (pin 2.28) |
-| ISA baseline | `armv8.1-a`, 302/302 within | `x86-64-v2`, 305/305 within |
+| shipped tarball | **107 MB** | — (conda-only: 60 MB) |
+| ELF objects | 339 | 305 (conda-only) |
+| source-installed files | 12787 | — |
+| glibc floor measured | 2.27 (pin 2.28) | 2.25 (pin 2.28) |
+| ISA baseline | `armv8.1-a`, **339/339 within** | `x86-64-v2`, 305/305 within |
 | CPUID-dispatching objects | 3 | 7 |
+| wall clock, clean build | ~12 min (12 cores) | ~4× that under Rosetta |
+
+The x86-64 column predates the source builds; it has been verified only for the
+conda-only stack, and re-running it is the first thing worth doing.
+
+Cross-distro, with solvers: verified on **`almalinux:8` (glibc 2.28, the floor)**
+and **`ubuntu:24.04` (glibc 2.39)** — `validate --runtime` clean, then
+`introduction_ex4` in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary
+in an image with no compiler, no python and no binutils.
+
+**The ISA result is the one to note.** 339/339 within `armv8.1-a` includes
+everything PETSc's six `--download-` TPLs built, each with its own build system.
+Nothing compiled from source exceeded the baseline — which is what the compiler
+wrapper layer exists to guarantee, and the only evidence that it does.
 
 `distcheck` is the claim that matters: tar, move the original **out of its
 path**, unpack at a different directory depth, validate, run 4 MPI ranks from
@@ -105,13 +121,14 @@ there. Verified cross-distro too — built on `almalinux:9`, then unpacked and r
 on `ubuntu:24.04` (glibc 2.39) **and `almalinux:8` (glibc 2.28, the floor)**, in
 a pristine image with no python, no binutils and no compiler.
 
-**Not written yet:** the real `pkgs/petsc`, `pkgs/libmesh`, `pkgs/trilinos`
-recipes; the compiler-wrapper layer (spec below); and the real smoke example,
-which is yours to provide. `test/smoke/smoke.c` is the staged placeholder — MPI
-today, with the PETSc `VecCreate` already written behind a feature define.
+`distcheck` now proves the whole claim with real solver code: the tarball is
+unpacked at a different path depth and `introduction_ex4` runs there in 1D, 2D
+and 3D, serial and on 4 ranks, writing ExodusII output — from a prebuilt binary,
+in a tree with no compiler.
 
-**Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`, and
-#5 (ISA baseline gate) → #4. Merge #4 first; GitHub retargets #5 automatically.
+**Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`,
+#5 (ISA baseline gate) → #4, and the source compiles → #5. Merge in that order;
+GitHub retargets each automatically.
 
 ## Gotchas already paid for
 
