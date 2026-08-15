@@ -151,6 +151,11 @@ Do not re-discover these.
   wrong distro. The verify service prints the distro and glibc it actually ran
   on — check that line.
 
+- **A space in the install path breaks the make fragments, and cannot be fixed.**
+  GNU make's path functions are list functions, so `$(dir …)`/`$(abspath …)`
+  split on the space. Binaries, `.pc` files and `libmesh-config` are unaffected;
+  libMesh's example Makefiles and PETSc's `lib/petsc/conf/*` are not. Install
+  somewhere without spaces if you build against the stack with make.
 - **Nothing is re-runnable over its own output — including a single package.**
   `make all` rewrites `$STACK` in place (A20), and a *source package* cannot be
   rebuilt over its own previous install either (A30): libMesh installs a bundled
@@ -196,7 +201,13 @@ Trilinos 14-4-0 and libMesh 1.7.9 all build, and the smoke harness now ends at
 `introduction_ex4` in 1D/2D/3D, serial and on N ranks, in place and again from
 the relocated tree.
 
-**Then:** PR 4 = `site/` extension hooks and docs; PR 5 = the CI matrix.
+**S6 is done too** — `examples/site-package/` is a real, tracked package proven
+by a clean `make all` with it copied into `site/`, and anything installed into
+`$STACK/libexec/stack-tests/` is exercised by `distcheck` automatically.
+`distcheck` also now unpacks under a path containing a **space** and runs the
+tree **read-only**.
+
+**Then:** the CI matrix (S7).
 
 Two things from PR 3 worth carrying forward:
 

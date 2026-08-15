@@ -985,6 +985,43 @@ Carrying those checks across *and looking at what they said* is what surfaced
 it. It is also the argument for the smoke test ending at `introduction_ex4`
 rather than at something that only proves the libraries link.
 
+**A32 — the relocatable make fragments cannot handle a space in the install
+path, and nothing can make them.** `distcheck` now unpacks under `.../a b/c`,
+and the first run found this. GNU make's path functions are *list* functions:
+with the tree under a path containing a space, `$(realpath …)` returns the
+correct string while `$(dir …)` and `$(abspath …)` split it and return nonsense.
+Measured directly:
+
+```
+realpath=[/tmp/sp test/a b/c/Makefile]
+__p=[/tmp /tmp/sp test/a b/c/test /tmp/sp test/a b/c/b]
+```
+
+No makefile can work around that — make cannot represent a filename containing a
+space. So the **binaries are fine** (all 342 objects resolve from such a path
+and everything runs), `.pc` files and `libmesh-config` are fine, and only the
+make-based build integration is affected. `validate.sh` reports it as a warning
+naming the cause rather than failing a gate over something unfixable.
+
+Worth stating the trade honestly: the *original* hardcoded `LIBMESH_DIR` would
+have handled a space fine, being a literal. Making it relocatable (A31) is what
+introduced the constraint. That is the right way round — relocation is the
+point — but it is a trade, and it is now documented rather than found later by
+someone with a space in their install path.
+
+**A33 — the extension point had never been extended.** S6's mechanisms all
+existed; its *verification* step — "add a throwaway package in `site/` and
+confirm it builds, gets patchelf'd, and survives `distcheck`" — did not.
+`examples/site-package/` is now a real package, tracked (it cannot live in
+`site/`, which is gitignored), and a clean `make all` with it copied into
+`site/` proves the claim end to end.
+
+It also produced a finding: the harness first ran *everything* executable under
+`libexec/`, and immediately tried to execute rdma-core's
+`truescale-serdes.cmds`. `libexec/` is shared with conda, so the extension point
+gets its own namespace, `libexec/stack-tests/`. No directory in this prefix
+belongs to us alone.
+
 **A31 — source packages bring build-integration metadata, and it bakes the
 prefix in formats the text fixup did not cover.** A conda-only tree had none of
 these. The three source packages install **115** text files naming the build
