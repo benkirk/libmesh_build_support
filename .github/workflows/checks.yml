@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # bash -n before shellcheck, because a file that does not parse produces
       # a wall of shellcheck noise that buries the actual syntax error.
@@ -121,7 +121,7 @@ jobs:
       PLATFORM: linux/amd64
       BUILDKIT_PROGRESS: plain
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The matrix above is a literal because GitHub will not let a matrix be
       # computed within the same job, and adding a whole preceding job to fan
