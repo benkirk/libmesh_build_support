@@ -101,6 +101,36 @@ else
 fi
 
 #------------------------------------------------------------------------------
+# The rewritten build-integration files must RESOLVE, not merely stop naming the
+# build prefix.
+#
+# This check exists because the textual one above passed while the answer was
+# wrong.  relocate/fixup-text.sh rewrites libMesh's example Makefiles to locate
+# the prefix from their own position; the first version computed the depth from
+# etc/libmesh/Make.common but that file is also symlinked as <prefix>/Make.common,
+# which is the path the examples actually include -- so it climbed two levels too
+# far and every LIBMESH_DIR resolved to "/opt".  Nothing else would have noticed:
+# the prefix string was gone, so the residue scan was satisfied.
+#
+# Asking make what it got is the only form of this check that means anything,
+# and it costs one process.
+ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
+if [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
+  got="$(cd "$(dirname "${ex4mk}")" \
+         && make -f - <<EOF 2>/dev/null
+include Makefile
+all:
+	@echo \$(LIBMESH_DIR)
+EOF
+  )"
+  if [ "${got}" = "${ROOT}" ]; then
+    ok "example Makefiles resolve LIBMESH_DIR to the tree they are in"
+  else
+    bad "example Makefile resolves LIBMESH_DIR to '${got}', expected '${ROOT}'"
+  fi
+fi
+
+#------------------------------------------------------------------------------
 # Embedded build-prefix residue.
 #
 # Scans binary files too.  'grep -rI' skips them, which is exactly how a prefix
