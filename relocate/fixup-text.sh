@@ -216,8 +216,8 @@ while IFS= read -r f; do
   sed -i -e "s|${STACK}|${NEUTRAL}|g" "$f"
   prov_fixed=$((prov_fixed + 1))
 done < <(
-  find "${STACK}/include" -type f \( -name '*.h' -o -name '*.hpp' \) 2>/dev/null \
-    | xargs -r grep -l "${STACK}" 2>/dev/null
+  find "${STACK}/include" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 2>/dev/null \
+    | xargs -0 -r grep -l "${STACK}" 2>/dev/null
   find "${STACK}/lib/petsc/conf" -type f \
        \( -name '*.py' -o -name 'configure-hash' \) 2>/dev/null
   find "${STACK}/lib/petsc/conf/modules" -type f 2>/dev/null

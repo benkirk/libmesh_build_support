@@ -51,7 +51,7 @@ jobs:
     uses: ./.github/workflows/stack.yml
     with:
       target_platform: ${{ matrix.target_platform }}
-      use_lock: false
+      ignore_lock: true
       refresh_lock: true
 
   #-----------------------------------------------------------------------------

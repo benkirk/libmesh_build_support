@@ -52,21 +52,22 @@ on:
         description: MPI ranks the smoke test asserts.  Runners have 4 vCPU.
         type: string
         default: '4'
-      use_lock:
+      ignore_lock:
         description: >
-          Create the env from the checked-in explicit lock (the default, and
-          what makes an artifact reproducible).  Set false to solve from
-          conda/env/*.yml instead, which is how nightly.yml asks conda-forge
-          whether the spec still resolves to something that works.
+          Solve from the spec even where a checked-in lock exists.  The lock is
+          the default, and is what makes an artifact reproducible -- which is
+          also why it can never tell us that conda/env/*.yml has stopped
+          resolving to something that works.  extended.yml asks that weekly.
         type: boolean
-        default: true
+        default: false
       refresh_lock:
         description: >
           Run 'make conda-lock' right after 'make conda', and publish what it
           wrote in the diagnostics artifact under lock/.  Right after,
           deliberately: by the end of 'make all' the env has been slimmed and
-          pruned, so a lock taken then would describe the artifact rather than
-          the environment that built it.
+          pruned, and the source builds have installed into it, so a lock taken
+          then would describe the artifact rather than the environment that
+          built it.
         type: boolean
         default: false
       verify_bases:
@@ -111,7 +112,12 @@ jobs:
     # a native runner.  QEMU would work and would take hours; the ISA scan
     # disassembles every ELF object and is punishing under emulation.
     runs-on: ${{ inputs.target_platform == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 120
+    # A clean build with PETSc, Trilinos and libMesh measured ~12 min on 12
+    # cores; runners have 4, and conda, the ISA scan and distcheck sit on top of
+    # that.  The ceiling is deliberately well clear of the estimate rather than
+    # close to it: a timeout kills the job before the diagnostics step, so the
+    # one run that most needs its logs is the one that loses them.
+    timeout-minutes: 180
     continue-on-error: ${{ inputs.experimental }}
     env:
       # docker/compose.yaml reads all of these.  Anything compose does not
@@ -161,7 +167,7 @@ jobs:
         run: >
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
-          -e CONDA_USE_LOCK='${{ inputs.use_lock && 'yes' || 'no' }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
           build make conda conda-lock
 
       - name: make all
@@ -169,7 +175,7 @@ jobs:
         run: >
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
-          -e CONDA_USE_LOCK='${{ inputs.use_lock && 'yes' || 'no' }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
           -e SMOKE_RANKS='${{ inputs.smoke_ranks }}'
           build make all
 
@@ -215,7 +221,22 @@ jobs:
           {
             echo "## ${{ inputs.target_platform }} · ${{ inputs.blas_provider }} · ${{ inputs.mpi_family }}"
             echo
-            echo "built on \`${{ inputs.base_image }}\`, env from ${{ inputs.use_lock && 'the checked-in lock' || 'a fresh conda-forge solve' }}"
+            # Report what the env was actually built from, not what was asked
+            # for.  These are not the same thing: bootstrap.sh falls back to
+            # solving when no lock exists for the configuration, and there is
+            # no linux-64 lock (A23).  An earlier version of this line printed
+            # the input and so claimed "from the checked-in lock" on a run that
+            # had solved from scratch.
+            case "${{ inputs.hdf5_parallel }}" in yes) h5=hdf5par ;; *) h5=hdf5ser ;; esac
+            lock="conda/lock/${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-${h5}.lock"
+            if [ "${{ inputs.ignore_lock }}" = true ]; then
+              src="a fresh conda-forge solve (lock ignored on purpose)"
+            elif [ -s "${lock}" ]; then
+              src="\`${lock}\`"
+            else
+              src="a fresh conda-forge solve — no lock exists for this configuration"
+            fi
+            echo "built on \`${{ inputs.base_image }}\`, env from ${src}"
             echo
             if [ -n "${t}" ]; then
               echo "| | |"
