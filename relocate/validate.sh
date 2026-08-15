@@ -69,7 +69,7 @@ ok   () { echo "  ok    $*"; }
 # stages.  Checks that are properties of the final dependency closure are
 # advisory until the closure is final.
 soft () {
-  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$@ [advisory: pre-slim]"; fi
+  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$* [advisory: pre-slim]"; fi
 }
 
 echo "=== validate (${MODE}, stage=${STAGE}) ${ROOT}"
@@ -98,6 +98,54 @@ if [ -n "${la}" ]; then
   echo "${la}" | sed 's/^/          /'
 else
   ok "no .la files"
+fi
+
+#------------------------------------------------------------------------------
+# The rewritten build-integration files must RESOLVE, not merely stop naming the
+# build prefix.
+#
+# This check exists because the textual one above passed while the answer was
+# wrong.  relocate/fixup-text.sh rewrites libMesh's example Makefiles to locate
+# the prefix from their own position; the first version computed the depth from
+# etc/libmesh/Make.common but that file is also symlinked as <prefix>/Make.common,
+# which is the path the examples actually include -- so it climbed two levels too
+# far and every LIBMESH_DIR resolved to "/opt".  Nothing else would have noticed:
+# the prefix string was gone, so the residue scan was satisfied.
+#
+# Asking make what it got is the only form of this check that means anything,
+# and it costs one process.
+# $(info) fires while make PARSES, so the value is printed before any recipe
+# would run.  The probe still defines its own goal, because this script runs
+# under 'set -o pipefail' and a make that exits non-zero on an unknown target
+# fails the whole pipeline -- which silently produced an empty answer and a
+# confusing "resolves to ''" the first time round.
+#
+# A path containing whitespace is exempt, and that is a real limitation rather
+# than an excuse.  GNU make's path functions are list functions: with the tree
+# at ".../a b/c", $(realpath ...) returns the right string but $(dir ...) and
+# $(abspath ...) split it on the space and return nonsense.  Nothing a makefile
+# can do fixes that -- make cannot represent a filename containing a space.
+#
+# So the ELF side of the artifact works from such a path (the loader has no such
+# problem, and every object here resolves) while the make-based build
+# integration does not.  Say so, once, rather than either failing the whole gate
+# or quietly skipping the check.
+ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
+if [ -f "${ex4mk}" ] && [ "${ROOT}" != "${ROOT%%[[:space:]]*}" ]; then
+  warn "skipping the LIBMESH_DIR probe: this path contains whitespace, which" \
+       "GNU make cannot represent (binaries are unaffected)"
+elif [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
+  probe="$( cd "$(dirname "${ex4mk}")" \
+            && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n__libmesh_probe:\n\t@true\n' \
+               | make -f - -n __libmesh_probe 2>/dev/null )" || probe=''
+  got="$(printf '%s\n' "${probe}" | sed -n 's/^__LMD=//p')"
+  if [ "${got}" = "${ROOT}" ]; then
+    ok "example Makefiles resolve LIBMESH_DIR to the tree they are in"
+  elif [ -z "${got}" ]; then
+    bad "example Makefile probe produced no value for LIBMESH_DIR"
+  else
+    bad "example Makefile resolves LIBMESH_DIR to '${got}', expected '${ROOT}'"
+  fi
 fi
 
 #------------------------------------------------------------------------------

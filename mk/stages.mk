@@ -14,8 +14,8 @@
 # are phony and ALWAYS re-run, because a gate you can satisfy by not running
 # it is not a gate.
 
-.PHONY: all conda build test relocate validate slim dist distcheck \
-        help shell clean distclean conda-lock print-config
+.PHONY: all conda wrappers wrappers-check build test relocate validate slim \
+        dist distcheck help shell clean distclean conda-lock print-config
 
 ## all: the whole workflow, conda through distcheck
 all: distcheck
@@ -56,6 +56,7 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 	  GCC_VERSION='$(GCC_VERSION)' MPI_VERSION='$(MPI_VERSION)' \
 	  MPI_PROVIDER='$(MPI_PROVIDER)' \
 	  HDF5_VERSION='$(HDF5_VERSION)' HDF5_PARALLEL='$(HDF5_PARALLEL)' \
+	  IGNORE_LOCK='$(IGNORE_LOCK)' CONDA_RECREATE='$(CONDA_RECREATE)' \
 	  bash conda/bootstrap.sh
 	$(call run_hooks,post-conda)
 	$(Q)touch $@
@@ -68,9 +69,37 @@ $(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
 	$(call run_hooks,post-build)
 	$(Q)touch $@
 
+#-------------------------------------------------------------------------------
+## wrappers: generate the build-time compiler wrappers that pin the ISA baseline
+wrappers: $(STAMPS)/wrappers.stamp
+$(STAMPS)/wrappers.stamp: $(STAMPS)/conda.stamp \
+                          wrappers/generate.sh wrappers/selftest.sh | $(STAMPS)
+	$(SAY) WRAPPERS '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) WRAPPER_ON_NATIVE='$(WRAPPER_ON_NATIVE)' \
+	  bash wrappers/generate.sh
+# The self-test runs here, in the same recipe that generates them, rather than
+# as a separate phony prerequisite of the build.  A phony gate would make
+# prebuild.stamp perpetually out of date and rebuild every package; running it
+# at generation time covers the only moment the answer can change.
+	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
+	$(Q)touch $@
+
+## wrappers-check: prove the wrappers cap the ISA, by scanning what they emit
+# Always re-runs: it is a gate, and it is seconds, not minutes.
+wrappers-check: $(STAMPS)/wrappers.stamp wrappers/selftest.sh
+	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
+
+#-------------------------------------------------------------------------------
 # pre-build runs once, before any package -- hence its own stamp rather than
 # a hook on build.stamp, which runs after the packages.
-$(STAMPS)/prebuild.stamp: $(STAMPS)/conda.stamp | $(STAMPS)
+#
+# Source builds sit downstream of the wrappers, so no package can be compiled
+# before the injection has been generated and proven.  A wrapper that silently
+# stopped injecting would produce a stack that is wrong in the one way this
+# project exists to prevent, and would look entirely normal doing it.
+$(STAMPS)/prebuild.stamp: $(STAMPS)/wrappers.stamp | $(STAMPS)
 	$(call run_hooks,pre-build)
 	$(Q)touch $@
 $(foreach p,$(PKGS),$(eval $(STAMPS)/$(p).stamp: $(STAMPS)/prebuild.stamp))
@@ -186,6 +215,7 @@ print-config:
 	  MPI_VERSION '$(MPI_VERSION)' ISA_BASELINE '$(ISA_BASELINE)' \
 	  HDF5_VERSION '$(HDF5_VERSION)' HDF5_PARALLEL '$(HDF5_PARALLEL)' \
 	  RPATH_MODE '$(RPATH_MODE)' \
+	  USE_WRAPPERS '$(USE_WRAPPERS)' WRAPPER_ON_NATIVE '$(WRAPPER_ON_NATIVE)' \
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \

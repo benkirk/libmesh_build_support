@@ -1,0 +1,149 @@
+# The fast gate.  Minutes, not an hour, and it runs on everything.
+#
+# A full 'make all' takes 20-40 minutes per architecture and needs the network,
+# a distro image and ~4 GB of disk.  Most of the mistakes people actually make
+# in this repo -- a shell script that does not parse, a stage graph that no
+# longer orders itself, an ISA regex that matches a symbol name -- can be caught
+# in under two minutes without building anything.  Catching them here means the
+# expensive matrix in stack.yml is spent on questions only a real build answers.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # bash -n before shellcheck, because a file that does not parse produces
+      # a wall of shellcheck noise that buries the actual syntax error.
+      - name: Shell scripts parse
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::does not parse"; fail=1; }
+          done < <(git ls-files '*.sh')
+          exit "$fail"
+
+      # --severity=warning, not the default.  The style/info tier is mostly
+      # advice about idioms this repo has chosen deliberately (unquoted
+      # $MAKE_J_L in pkgs/_template/build.sh wants to word-split), and a gate
+      # that fires on things you intend to keep is a gate you learn to ignore.
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get -qq install -y shellcheck
+          git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+
+      - name: Python sources compile
+        run: python3 -m py_compile relocate/*.py
+
+      # The one real test that needs no build.  It exists because the x86
+      # instruction patterns cannot be exercised on an aarch64 developer
+      # machine: without it, "0 objects above baseline" and "the regexes never
+      # matched anything" look identical.  Six of its cases are false-positive
+      # line shapes the scanner really produced.
+      - name: ISA scanner self-test
+        run: python3 relocate/isa-scan.py --self-test
+
+      # 'make -n all' is a genuine check on the stage graph, not a smoke test:
+      # it is what caught A1, where 'all' resolved to 'dist' and skipped the
+      # gate entirely.  Under -j8 as well, because the ordering it prints has
+      # to be a real dependency graph rather than an accident of declaration
+      # order.  No config.mk exists here, so this also proves the defaults are
+      # coherent on their own.
+      - name: Stage graph
+        run: |
+          make -n all >/dev/null
+          make -j8 -n all >/dev/null
+          make help
+          make print-config
+
+      # The two files that decide what CI runs against.  bases.sh is the one
+      # place the image list is read from, so if it stops emitting valid JSON
+      # the stack.yml matrix fails to expand -- which shows up as a confusing
+      # "matrix must define at least one vector" rather than as this.
+      - name: Base-image matrix is well formed
+        run: |
+          bash docker/bases.sh --list
+          bash docker/bases.sh --json | python3 -m json.tool
+          n=$(bash docker/bases.sh --list | wc -l)
+          [ "$n" -gt 0 ] || { echo "::error::docker/bases.env lists no images"; exit 1; }
+          echo "$n verify images"
+
+      - name: Compose files are valid
+        working-directory: docker
+        env:
+          BASE_IMAGE: almalinux:9
+          PLATFORM: linux/amd64
+        run: docker compose config --quiet
+
+      - name: actionlint
+        run: |
+          docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
+  #-----------------------------------------------------------------------------
+  # Build every base image in the matrix, and nothing else.
+  #
+  # This is not a build of the stack; it is the minimal-host claim being tested
+  # on its own.  Dockerfile.builder installs only what a base image is genuinely
+  # MISSING and prints exactly that, so this job's log is the answer to "what
+  # does a bare RHEL 8 actually lack?" -- which is the number the whole premise
+  # rests on.  A14 is what happens when it goes untested: the builder image
+  # could not build on almalinux:9 at all, because it asked for curl and the
+  # image ships curl-minimal.
+  #
+  # It costs a couple of minutes per image and catches that class of break
+  # before anyone waits 40 minutes for a build job to fail at step one.
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [almalinux:8, almalinux:9, 'opensuse/leap:15', 'ubuntu:22.04', 'ubuntu:24.04']
+    name: images (${{ matrix.base }})
+    env:
+      BASE_IMAGE: ${{ matrix.base }}
+      VERIFY_IMAGE: ${{ matrix.base }}
+      PLATFORM: linux/amd64
+      BUILDKIT_PROGRESS: plain
+    steps:
+      - uses: actions/checkout@v4
+
+      # The matrix above is a literal because GitHub will not let a matrix be
+      # computed within the same job, and adding a whole preceding job to fan
+      # out five one-minute image builds is not worth it.  So assert the copy
+      # matches the source instead of trusting it to.
+      - name: Matrix agrees with docker/bases.env
+        run: |
+          grep -qx "${BASE_IMAGE}" <(bash docker/bases.sh --list) || {
+            echo "::error::${BASE_IMAGE} is in checks.yml but not in docker/bases.env"
+            exit 1
+          }
+          n_env=$(bash docker/bases.sh --list | wc -l)
+          n_job=${{ strategy.job-total }}
+          [ "${n_env}" -eq "${n_job}" ] || {
+            echo "::error::docker/bases.env lists ${n_env} images, checks.yml matrix has ${n_job}"
+            exit 1
+          }
+
+      - name: Builder image
+        working-directory: docker
+        run: docker compose build build
+
+      - name: Verify image
+        working-directory: docker
+        run: docker compose build verify

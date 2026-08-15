@@ -37,8 +37,9 @@ sets.
 ## `build.sh` contract
 
 Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
-`TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `TOPDIR`, and
-its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` / `PKG_DIR`.
+`TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `ISA_BASELINE`,
+`USE_WRAPPERS`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
+`PKG_DIR`.
 
 Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
 which is what keeps a shared build host usable.
@@ -58,8 +59,58 @@ Two rules that matter:
    later in `relocate/patchelf.sh`. Do not try to inject `$ORIGIN` at configure
    time — libtool mangles it, and a normalization pass exists precisely so you
    don't have to fight that.
+3. **Do not set `-march` yourself.** `activate_toolchain` puts the ISA wrappers
+   ahead of everything on `PATH`, and they append `-march=$ISA_BASELINE` after
+   whatever your build system passes — because `-march` is last-wins and
+   `CFLAGS` are injected first. Anything you set will simply lose. If your
+   package needs a *higher* baseline, raise `ISA_BASELINE`; that is a decision
+   about the whole artifact, not about one package. See `wrappers/README.md`.
 
 Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
+
+## Worked example
+
+`examples/site-package/` is a complete, working package — copy it and edit:
+
+```sh
+cp -r examples/site-package site/my-solver
+make build
+```
+
+It is kept under `examples/` rather than `site/` so it can be tracked, and so it
+is *exercised* rather than merely described: the full pipeline is run with it in
+place, and it goes through `patchelf`, `validate` and `distcheck` like anything
+else. It also shows two things the template does not: a package with **no
+`PKG_URL`** (it generates its own sources), and one that declares `PKG_DEPS`.
+
+## Getting your package tested
+
+Install an executable into **`$STACK/libexec/stack-tests/`** and `test/run.sh`
+will run it — serially and under `mpiexec`, in place and again from the
+relocated tree inside `distcheck`. No edit to the harness is needed.
+
+The assertion is deliberately weak: exit 0, and some output. The harness cannot
+know what your program prints. What it does check is the part that matters here
+— that the binary *loads*, with every library resolved, from wherever the tree
+now lives.
+
+Note the directory: `libexec/` itself is shared with conda packages (rdma-core
+ships an executable there), so the extension point gets its own namespace rather
+than scooping up whatever happens to be executable.
+
+## Known limitation: whitespace in the install path
+
+The **binaries** work from a path containing a space — `distcheck` unpacks into
+one on every run and all objects resolve. The **make-based build integration**
+does not: libMesh's example Makefiles and PETSc's `lib/petsc/conf/*` locate the
+prefix from their own position, and GNU make's path functions are list
+functions. With the tree at `.../a b/c`, `$(realpath …)` returns the right
+string but `$(dir …)` and `$(abspath …)` split it on the space.
+
+This is not something a makefile can work around — make cannot represent a
+filename containing a space. `validate.sh` reports it rather than failing, and
+`.pc` files and `libmesh-config` are unaffected. Install somewhere without
+spaces if you intend to build against the stack with make.
 
 ## Hooks
 

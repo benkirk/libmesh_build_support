@@ -1,5 +1,8 @@
 # libMesh Build Support
 
+[![checks](https://github.com/benkirk/libmesh_build_support/actions/workflows/checks.yml/badge.svg)](https://github.com/benkirk/libmesh_build_support/actions/workflows/checks.yml)
+[![ci](https://github.com/benkirk/libmesh_build_support/actions/workflows/ci.yml/badge.svg)](https://github.com/benkirk/libmesh_build_support/actions/workflows/ci.yml)
+
 Builds a **relocatable, shared-library stack** that can be tarred up, unpacked
 anywhere on a customer's machine, and run — with no host dependencies beyond
 core glibc.
@@ -56,6 +59,7 @@ for `BLAS_PROVIDER=mkl`.
 | `relocate/` | patchelf, path fixup, prune, slim, and the validator |
 | `test/` | smoke harness and the relocation proof |
 | `docker/` | the local dev loop, reused by CI |
+| `.github/workflows/` | the fast gate, and build-once-verify-everywhere |
 
 The conda environment **is** the install prefix — there is no separate staging
 tree and no copy step. Build-only packages (compilers, cmake, sysroot) are
@@ -64,10 +68,30 @@ pruned before packing; the compiler *runtime* stays, because
 
 ## Status
 
-Early. The driver, conda bootstrap and container loop work. The relocate,
-prune, slim and validate stages are scaffolded stubs that exit non-zero — see
-the sprint breakdown in the design doc, and
-[`docs/HANDOFF.md`](docs/HANDOFF.md) for what is verified versus what is not.
+The pipeline is green end to end on `linux-64` and `linux-aarch64`: `make all`
+runs conda → relocate → validate → slim → dist → `distcheck`, and the tarball
+it produces has been unpacked and run on distros from glibc 2.28 to 2.39. Every
+pull request re-runs that, on both architectures, across five base images.
+
+What it does *not* yet contain is the point of the exercise: the PETSc, libMesh
+and Trilinos recipes are not written, so today's tarball is the conda
+environment and a placeholder MPI smoke test. See the sprint breakdown in the
+design doc, and [`docs/HANDOFF.md`](docs/HANDOFF.md) for what is verified
+versus what is not.
+
+## CI
+
+| workflow | when | what |
+|---|---|---|
+| `checks.yml` | every push and PR | parses, lints, stage graph, ISA self-test, every base image builds — about two minutes |
+| `ci.yml` | PRs and `main` | `make all` on both target platforms, then the tarball unpacked and run on all five base images |
+| `extended.yml` | weekly | a fresh conda-forge solve instead of the lock, plus the knobs nobody runs: MKL, parallel HDF5, a Debian-family builder |
+
+The jobs drive `docker compose` against `docker/`, so they run the same images
+and the same commands as the local dev loop — and the verify matrix expands
+from `docker/bases.env`, so adding a distro there adds it to CI. Each build
+publishes its tarball as a workflow artifact, which is the most convenient way
+to get one onto real hardware.
 
 ## History
 

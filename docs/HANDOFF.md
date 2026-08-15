@@ -11,16 +11,17 @@ Everything you need to pick this up on a Mac. Written after landing **S0**
 
 **`make all` is green end to end on native `linux-aarch64`.** The conda
 environment **is** the redistributable prefix; it is relocated with
-`$ORIGIN` rpaths, pruned from 1.6 G to a **60 MB** tarball, and `distcheck`
-proves the claim: tar, move the original out of its path, unpack at a different
-directory depth, validate, run 4 MPI ranks from there.
+`$ORIGIN` rpaths, pruned to a **107 MB** tarball, and `distcheck` proves the
+claim: tar, move the original out of its path, unpack at a different directory
+depth, validate, and run there.
 
 Verified across distros, which is the part that matters — built on
 `almalinux:9`, then unpacked and run on `ubuntu:24.04` (glibc 2.39) **and on
-`almalinux:8` (glibc 2.28, the declared floor)**.
+`almalinux:8` (glibc 2.28, the declared floor)**, with the full solver stack
+running `introduction_ex4` on both.
 
-Still to come: the PETSc / libMesh / Trilinos recipes, and the real smoke
-example.
+PETSc 3.20.5, Trilinos 14-4-0 and libMesh 1.7.9 are built from source into that
+same prefix, and the smoke harness ends at libMesh's `introduction_ex4`.
 
 ## Get running on the Mac
 
@@ -88,16 +89,31 @@ with `rm -rf $BUILD_ROOT/stack $BUILD_ROOT/.work && make all`, or
 
 ## What is verified, and what is not
 
-**Green end to end on BOTH platforms**, `make conda` through `make distcheck`:
+**Green end to end**, `make conda` through `make distcheck`, with PETSc,
+Trilinos and libMesh built from source:
 
 | | linux-aarch64 (native) | linux-64 (Rosetta) |
 |---|---|---|
-| env as solved | 1.6 G | 1.6 G |
-| shipped tarball | **60 MB** | — |
-| ELF objects | 302 | 305 |
-| glibc floor measured | 2.25 (pin 2.28) | 2.25 (pin 2.28) |
-| ISA baseline | `armv8.1-a`, 302/302 within | `x86-64-v2`, 305/305 within |
+| shipped tarball | **107 MB** | — (conda-only: 60 MB) |
+| ELF objects | 339 | 305 (conda-only) |
+| source-installed files | 12787 | — |
+| glibc floor measured | 2.27 (pin 2.28) | 2.25 (pin 2.28) |
+| ISA baseline | `armv8.1-a`, **339/339 within** | `x86-64-v2`, 305/305 within |
 | CPUID-dispatching objects | 3 | 7 |
+| wall clock, clean build | ~12 min (12 cores) | ~4× that under Rosetta |
+
+The x86-64 column predates the source builds; it has been verified only for the
+conda-only stack, and re-running it is the first thing worth doing.
+
+Cross-distro, with solvers: verified on **`almalinux:8` (glibc 2.28, the floor)**
+and **`ubuntu:24.04` (glibc 2.39)** — `validate --runtime` clean, then
+`introduction_ex4` in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary
+in an image with no compiler, no python and no binutils.
+
+**The ISA result is the one to note.** 339/339 within `armv8.1-a` includes
+everything PETSc's six `--download-` TPLs built, each with its own build system.
+Nothing compiled from source exceeded the baseline — which is what the compiler
+wrapper layer exists to guarantee, and the only evidence that it does.
 
 `distcheck` is the claim that matters: tar, move the original **out of its
 path**, unpack at a different directory depth, validate, run 4 MPI ranks from
@@ -105,13 +121,15 @@ there. Verified cross-distro too — built on `almalinux:9`, then unpacked and r
 on `ubuntu:24.04` (glibc 2.39) **and `almalinux:8` (glibc 2.28, the floor)**, in
 a pristine image with no python, no binutils and no compiler.
 
-**Not written yet:** the real `pkgs/petsc`, `pkgs/libmesh`, `pkgs/trilinos`
-recipes; the compiler-wrapper layer (spec below); and the real smoke example,
-which is yours to provide. `test/smoke/smoke.c` is the staged placeholder — MPI
-today, with the PETSc `VecCreate` already written behind a feature define.
+`distcheck` now proves the whole claim with real solver code: the tarball is
+unpacked at a different path depth and `introduction_ex4` runs there in 1D, 2D
+and 3D, serial and on 4 ranks, writing ExodusII output — from a prebuilt binary,
+in a tree with no compiler.
 
-**Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`, and
-#5 (ISA baseline gate) → #4. Merge #4 first; GitHub retargets #5 automatically.
+**Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`,
+#5 (ISA baseline gate) → #4, #7 (source compiles) → #5, and #6 (the CI
+workflows) → #7. Merge in that order; GitHub retargets each one automatically
+as the one below it lands.
 
 ## Gotchas already paid for
 
@@ -134,6 +152,32 @@ Do not re-discover these.
   wrong distro. The verify service prints the distro and glibc it actually ran
   on — check that line.
 
+- **A space in the install path breaks the make fragments, and cannot be fixed.**
+  GNU make's path functions are list functions, so `$(dir …)`/`$(abspath …)`
+  split on the space. Binaries, `.pc` files and `libmesh-config` are unaffected;
+  libMesh's example Makefiles and PETSc's `lib/petsc/conf/*` are not. Install
+  somewhere without spaces if you build against the stack with make.
+- **Nothing is re-runnable over its own output — including a single package.**
+  `make all` rewrites `$STACK` in place (A20), and a *source package* cannot be
+  rebuilt over its own previous install either (A30): libMesh installs a bundled
+  Boost subset into `$STACK/include`, and on a second pass `contrib/metaphysicl`
+  finds `boost/version.hpp`, decides Boost is available, and dies on the
+  `boost/chrono.hpp` that subset lacks. Incremental rebuilds are for diagnosis;
+  the build that counts starts from a clean `$STACK`.
+- **A checked-in lock silently shadows `conda/bootstrap.sh`'s spec list.** That
+  is what a lock is for, and it cost two build cycles: editing the specs changes
+  nothing, with no warning, and the package you added is simply not there. Use
+  `make conda IGNORE_LOCK=1`, then `make conda-lock` to refreeze.
+- **Build tools are pinned to the era of the sources they build**, not to the
+  newest: `cmake<4` (CMake 4 hard-errors on Trilinos 14-4-0's
+  `cmake_minimum_required(VERSION 2.6)`), `python<3.13` (PETSc 3.20.5's
+  configure imports `xdrlib`, removed in 3.13), and `diffutils` (PETSc's
+  configure needs `diff`). All three are on `prune.list`, so none is visible in
+  the artifact — which is what makes the pins cheap.
+- **v0's download URLs are not all alive.** PETSc's `ftp.mcs.anl.gov` was
+  retired by ANL; snapshots are at `web.cels.anl.gov`. libMesh **1.7.6 has no
+  release tarball at all** — only 1.7.8 and 1.7.9 in that series do — hence
+  `LIBMESH_VERSION = 1.7.9`.
 - **Never request the bare `libblas`/`liblapack` metapackages.** They drag in
   ~560 MB of MKL alongside the openblas actually selected. Use `libopenblas`
   plus `blas=*=openblas`.
@@ -153,38 +197,52 @@ Do not re-discover these.
 
 ## Where to pick up
 
-**PR 3 — source compiles.** Three commit groups, in this order:
+**PR 3 — source compiles — is done.** The compiler wrapper layer, PETSc 3.20.5,
+Trilinos 14-4-0 and libMesh 1.7.9 all build, and the smoke harness now ends at
+`introduction_ex4` in 1D/2D/3D, serial and on N ranks, in place and again from
+the relocated tree.
 
-1. **The compiler wrapper layer**, before any package uses it. Build-time only:
-   wrappers live outside the shipped tree and go on `PATH` ahead of
-   `$STACK/bin` during source builds. They append `-march=$(ISA_BASELINE)`
-   **last** — that is the entire point, since `-march` is last-wins on a gcc
-   command line and `CFLAGS` are injected first, so nothing set through the
-   environment can beat a build system that appends its own. They must also
-   hard-error on `-march=native` rather than silently correcting it.
+**S6 is done too** — `examples/site-package/` is a real, tracked package proven
+by a clean `make all` with it copied into `site/`, and anything installed into
+`$STACK/libexec/stack-tests/` is exercised by `distcheck` automatically.
+`distcheck` also now unpacks under a path containing a **space** and runs the
+tree **read-only**.
 
-   Precedent is [NCAR/ncarcompilers](https://github.com/NCAR/ncarcompilers);
-   adapt rather than vendor — it assumes NCAR's module environment.
+**CI is in place** (§S7), so the source recipes land into a matrix that is
+watching. Three things to know about it before you push:
 
-   Traps to expect: avoid recursion (exec the real compiler by absolute path,
-   or keep the wrapper dir off `PATH` at that moment); stay silent on stdout,
-   because configure runs thousands of compile tests and parses their output;
-   pass `-v`/`--version`/`-print-*` through untouched, since PETSc introspects
-   the compiler; and do **not** wrap `mpicc` as well as `cc` — mpicc already
-   calls the wrapped `cc`, so wrapping both double-injects.
+- `ci.yml` runs `make all` on **both** target platforms for every PR, then
+  unpacks that tarball on five base images. A PETSc or Trilinos recipe that
+  builds on your Mac and not on a runner is a red job rather than a discovery
+  six weeks later — and it is what re-runs the `linux-64` column that the
+  source builds have not yet been verified against.
+- **Runners have 4 cores.** The job timeout is 180 min, which is generous
+  against a clean source build (~12 min on 12 cores), but the number that will
+  bite first is the ISA scan: it was **18 of the 21 minutes** of the first
+  x86 conda-only build, and the source builds only add objects to it. If build
+  time becomes a problem, that is where to look — not at the matrix width.
+- The compiler wrapper is exactly what the ISA gate is watching for, and the
+  gate runs inside `make all`. If the wrapper's last-wins injection loses to
+  Kokkos, CI says so on both architectures before it reaches a customer.
 
-2. **PETSc**, then **Trilinos** (no longer depends on PETSc — that dependency
-   existed only to scavenge `libfblas.a`, so the two build concurrently), then
-   **libMesh**. Port from `git show v0-static-stack:petsc/build.sh` and friends.
+Gaps CI cannot close for you, all recorded as amendments: `linux-64` has no
+checked-in conda lock, so the two platforms are not even building the same
+package set (A37 — `extended.yml` publishes a lock weekly; it needs committing
+from a solve someone has watched succeed); `strip` takes SIGBUS on at least one
+object and `slim.sh` swallows it (A39); and neither `MPI_FAMILY=openmpi` nor
+`GLIBC_FLOOR=2.17` is wired into the matrix, because each is missing a
+prerequisite named in §S7 rather than merely unwritten.
 
-3. **The smoke example** grows: PETSc `VecCreate`, then libMesh, culminating in
-   `introduction_ex4`.
+Two things from PR 3 worth carrying forward:
 
-The ISA gate is what will tell you whether the wrapper's last-wins injection
-actually won — particularly against Kokkos, which autodetects the host
-architecture and arrives with Trilinos.
-
-**Then:** PR 4 = `site/` extension hooks and docs; PR 5 = the CI matrix.
+- **The ISA wrapper held against real code.** After PETSc, the only objects in
+  `$STACK/lib` above `armv8.1-a` were conda's own prebuilts (`libgcc_s`,
+  `libcrypto`, `libopenblas`). Nothing built from source exceeded the baseline,
+  across six `--download-` TPLs with six different build systems. Kokkos never
+  got the chance to prove the harder case — it stays off at 14-4-0 (A12).
+- **The version pins inherited from v0 are claims about the past.** Two of three
+  download URLs were dead, and three build tools had moved out from under the
+  pinned sources. Expect the same when the pins are next bumped.
 
 ## Layout
 
@@ -193,12 +251,14 @@ Makefile  mk/          driver: knobs, discovery, stage targets
 config.mk.example      copy to config.mk (gitignored)
 profiles/              version sets: default, stable, bleeding
 conda/                 bootstrap, env specs, locks, prune.list
-pkgs/                  source recipes; _template/ to copy
+wrappers/              build-time compiler wrappers: the ISA cap + its self-test
+pkgs/                  source recipes: petsc, trilinos, libmesh; _template/ to copy
 site/                  YOUR recipes — gitignored, auto-discovered
 hooks/                 pre-/post- stage injection points
-relocate/              patchelf, fixup, prune, slim, validate  (stubs)
-test/                  smoke harness + relocation proof        (stubs)
-docker/                the dev loop; CI reuses these files
+relocate/              patchelf, fixup, prune, slim, validate, isa-scan
+test/                  smoke harness + relocation proof
+docker/                the dev loop; CI runs these same files
+.github/workflows/     fast gate, build-once-verify-everywhere, weekly extras
 ```
 
 Generated at runtime, none of it tracked:

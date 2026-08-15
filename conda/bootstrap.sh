@@ -71,8 +71,45 @@ CONDA="${CONDA_HOME}/bin/conda"
 case "${HDF5_PARALLEL}" in yes) h5tag=hdf5par ;; *) h5tag=hdf5ser ;; esac
 lock="${TOPDIR}/conda/lock/${ctag}-${BLAS_PROVIDER}-${MPI_FAMILY}-${h5tag}.lock"
 
-if [ -s "${lock}" ]; then
+#-------------------------------------------------------------------------------
+# The prefix is SEALED once source builds have installed into it.
+#
+# 'conda create -p $STACK' does not ask whether the prefix already holds
+# anything -- it recreates it, and everything a source build put there is gone.
+# This is not hypothetical and it is not obscure: conda.stamp depends on THIS
+# FILE, so simply editing bootstrap.sh marks the conda stage out of date, and
+# the next 'make build' silently destroys the tree before rebuilding it.  That
+# is how a completed PETSc install -- 8510 files, twenty-five minutes -- was
+# lost while adding one package to the spec list.
+#
+# So: an existing env is left alone.  Re-provisioning is a deliberate act, and
+# when there are source installs to lose it has to be spelled out.
+if [ -d "${STACK}/conda-meta" ]; then
+  if [ "${CONDA_RECREATE:-0}" = 1 ]; then
+    echo "CONDA_RECREATE=1: removing the existing env at ${STACK}"
+    rm -rf "${STACK}"
+  elif [ -s "${STACK}/etc/source-files.txt" ]; then
+    echo "env at ${STACK} is SEALED: $(wc -l < "${STACK}/etc/source-files.txt") path(s)"
+    echo "  were installed there by source builds.  Recreating it would destroy them."
+    echo "  Nothing to do.  To start over: 'make distclean', or CONDA_RECREATE=1."
+    exit 0
+  else
+    echo "env already exists at ${STACK}; leaving it alone"
+    echo "  (CONDA_RECREATE=1 to rebuild it from scratch)"
+    exit 0
+  fi
+fi
+
+# A lock, once checked in, SHADOWS the spec list below -- which is the whole
+# point of a lock, and also a trap worth naming.  Editing the specs while a lock
+# exists changes nothing, silently: the env is still built from the frozen list,
+# and the package you added is simply absent.  (Measured, twice, adding
+# diffutils.)  IGNORE_LOCK=1 forces a fresh solve; 'make conda-lock' then
+# refreezes it.
+if [ -s "${lock}" ] && [ "${IGNORE_LOCK:-0}" != 1 ]; then
   echo "creating ${STACK} from lock ${lock##*/}"
+  echo "  (spec changes in conda/bootstrap.sh are IGNORED while this lock exists;"
+  echo "   use 'make conda IGNORE_LOCK=1' then 'make conda-lock' to change it)"
   "${CONDA}" create -y -p "${STACK}" --file "${lock}"
 else
   echo "no lock for ${ctag}-${BLAS_PROVIDER}-${MPI_FAMILY}; solving from spec"
@@ -89,7 +126,30 @@ else
     "gxx_${ctag}=${GCC_VERSION}"
     "gfortran_${ctag}=${GCC_VERSION}"
     "sysroot_${ctag}=${GLIBC_FLOOR}"
-    cmake ninja make pkg-config python
+    #  - cmake and python are pinned to the era of the sources we build, not to
+    #    the newest available.  Both are BUILD tools: conda/prune.list drops
+    #    them before packing, so neither pin is visible in the artifact, and
+    #    neither is a statement about what the stack supports.
+    #
+    #    cmake < 4: CMake 4.0 removed compatibility with
+    #    'cmake_minimum_required(VERSION <3.5)' and hard-errors on it.  Trilinos
+    #    14-4-0 still declares 2.6, 2.6.4, 2.7, 2.8.4, 2.8.8, 3.0 and 3.1 across
+    #    its sub-projects (measured, not assumed), so CMake 4 cannot configure
+    #    it at all.
+    #
+    #    python < 3.13: PETSc 3.20.5's configure imports 'xdrlib', which was
+    #    removed from the standard library in Python 3.13.  Unpinned, the solve
+    #    took 3.14 and PETSc died with "No module named 'xdrlib'" before it
+    #    reached a compiler.
+    #  - diffutils: PETSc's configure fails with "Could not locate diff
+    #    executable".  It goes here rather than into docker/Dockerfile.builder
+    #    because the conda env is the toolchain -- make, cmake and pkg-config
+    #    already come from here, and the builder image is deliberately kept as
+    #    poor as a customer's host.
+    #  - m4: libMesh's bundled netcdf configure stops with "Cannot find m4
+    #    utility".  Same category as diffutils -- a build tool the conda env
+    #    owns, not a host prerequisite.
+    "cmake<4" "python<3.13" ninja make pkg-config diffutils m4
     #  - patchelf is deliberately NOT pinned >= 0.18, despite that being the
     #    version that fixes program-header-growth corruption: conda-forge
     #    marked every 0.18.0 build 'broken' on main across all Linux subdirs,
