@@ -120,16 +120,51 @@ STRIP="$(ls "${STACK}"/bin/*-strip 2>/dev/null | head -1 || true)"
 [ -x "${STRIP:-}" ] || STRIP="$(command -v strip || true)"
 if [ -x "${STRIP:-}" ]; then
   n=0
+  nfail=0
   while IFS= read -r -d '' f; do
     [ "$(LC_ALL=C head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' ')" = "7f454c46" ] || continue
     # --strip-unneeded, never --strip-all: the latter can remove the dynamic
     # symbols a shared library exists to provide.
-    "${STRIP}" --strip-unneeded "$f" 2>/dev/null && n=$((n + 1)) || true
+    #
+    # Failures stay non-fatal -- that tolerance is deliberate, since a library
+    # we cannot strip is a size problem and not a correctness one -- but they
+    # are no longer INVISIBLE.  The previous form, '2>/dev/null && n=... ||
+    # true', discarded both the message and the status, and CI has been dying
+    # in here: SIGBUS on x86-64, SIGSEGV on aarch64, every run.  All the log
+    # carried was bash's own "Bus error (core dumped)" line, which names
+    # neither the file nor the reason.
+    #
+    # Decoding the status matters more than capturing stderr, because a process
+    # killed by a signal writes nothing to stderr at all -- 128+signum is the
+    # whole diagnosis.  So report both, and name the file, which is the part
+    # that was missing.
+    if err="$("${STRIP}" --strip-unneeded "$f" 2>&1)"; then
+      n=$((n + 1))
+    else
+      rc=$?   # must be first: anything else here clobbers it
+      nfail=$((nfail + 1))
+      # Only the first few.  One systematically bad object should not bury the
+      # rest of the slim log, and the count below still reports the total.
+      if [ "${nfail}" -le 5 ]; then
+        if [ "${rc}" -gt 128 ] && [ "${rc}" -lt 192 ]; then
+          why="killed by SIG$(kill -l "$((rc - 128))" 2>/dev/null || echo "?")"
+        else
+          why="exit ${rc}"
+        fi
+        echo "  warn: strip ${why}: ${f#"${STACK}"/}${err:+ -- ${err}}"
+      fi
+    fi
     # Executables too, not just libraries: -g leaves the build directory in
     # DWARF, which shows up as embedded-build-path residue at the final gate.
   done < <(find "${STACK}/lib" "${STACK}/bin" "${STACK}/libexec" \
                 -type f ! -name '*.a' -print0 2>/dev/null)
-  echo "  stripped ${n} objects"
+  if [ "${nfail}" -gt 0 ]; then
+    # Deliberately not a failure.  It is a number to watch: it was 0 before the
+    # source builds landed, and any growth is worth a look.
+    echo "  stripped ${n} objects, ${nfail} failed"
+  else
+    echo "  stripped ${n} objects"
+  fi
 else
   echo "  warn: no strip found; skipping (binutils already pruned?)"
 fi
