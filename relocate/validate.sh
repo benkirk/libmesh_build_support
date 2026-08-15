@@ -114,18 +114,21 @@ fi
 #
 # Asking make what it got is the only form of this check that means anything,
 # and it costs one process.
-# $(info) fires while make PARSES, so the probe needs no recipe and no tab, and
-# an unbuildable goal is fine -- we have the answer before make gives up.  The
-# '|| true' matters: this runs under 'set -e', and make exiting non-zero here
-# must not take the whole validator with it.
+# $(info) fires while make PARSES, so the value is printed before any recipe
+# would run.  The probe still defines its own goal, because this script runs
+# under 'set -o pipefail' and a make that exits non-zero on an unknown target
+# fails the whole pipeline -- which silently produced an empty answer and a
+# confusing "resolves to ''" the first time round.
 ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
 if [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
-  got="$( cd "$(dirname "${ex4mk}")" \
-          && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n' \
-             | make -f - -n __libmesh_probe 2>/dev/null \
-             | sed -n 's/^__LMD=//p' | head -1 )" || got=''
+  probe="$( cd "$(dirname "${ex4mk}")" \
+            && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n__libmesh_probe:\n\t@true\n' \
+               | make -f - -n __libmesh_probe 2>/dev/null )" || probe=''
+  got="$(printf '%s\n' "${probe}" | sed -n 's/^__LMD=//p')"
   if [ "${got}" = "${ROOT}" ]; then
     ok "example Makefiles resolve LIBMESH_DIR to the tree they are in"
+  elif [ -z "${got}" ]; then
+    bad "example Makefile probe produced no value for LIBMESH_DIR"
   else
     bad "example Makefile resolves LIBMESH_DIR to '${got}', expected '${ROOT}'"
   fi
