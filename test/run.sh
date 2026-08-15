@@ -17,6 +17,7 @@ MODE="${1:-inplace}"
 SMOKE_RANKS="${SMOKE_RANKS:-4}"
 SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/smoke" && pwd)"
 SMOKE_BIN="${STACK}/libexec/smoke"
+EX4_BIN="${STACK}/libexec/introduction_ex4"
 
 # The contract this harness supplies to test/smoke/Makefile.
 export STACK
@@ -74,6 +75,38 @@ run_parallel () {
 }
 
 #------------------------------------------------------------------------------
+# libMesh's introduction_ex4 -- the endpoint this harness was always aiming at.
+#
+# A real FEM solve in 1D, 2D and 3D, exercising libMesh, PETSc, HDF5, netcdf and
+# MPI at once.  It is run in a scratch directory because it writes mesh output,
+# and that output is the point: the ExodusII write is the step that caught the
+# stale netcdf_meta.h in the libMesh tarball (amendment A29).  A test that only
+# checked the solve would have passed while every ExodusII file silently failed
+# to be written.
+run_ex4 () {
+  local label="$1"; shift
+  local dir out
+  [ -x "${EX4_BIN}" ] || { echo "--- ex4 skipped: libMesh not in this stack"; return 0; }
+  mkdir -p "${WORK:-/tmp}"
+  dir="$(mktemp -d "${WORK:-/tmp}/ex4.XXXXXX")"
+  for opts in "-d 1 -n 20" "-d 2 -n 15" "-d 3 -n 6"; do
+    echo "--- introduction_ex4 ${label} ${opts}"
+    # shellcheck disable=SC2086
+    out=$( cd "${dir}" && "$@" "${EX4_BIN}" ${opts} 2>&1 ) \
+      || { echo "${out}" | tail -25; fail "introduction_ex4 ${opts} exited non-zero"; }
+    grep -q "Error creating ExodusII" <<<"${out}" \
+      && { echo "${out}" | tail -15; fail "ex4 could not write its ExodusII output"; }
+  done
+  # The solve is only half of it; assert the output files exist and are not
+  # empty, which is what "the write succeeded" actually means.
+  local n
+  n=$(find "${dir}" -name '*.e' -size +0c | wc -l)
+  [ "${n}" -ge 1 ] || fail "ex4 wrote no non-empty ExodusII output"
+  echo "    ${n} ExodusII file(s) written"
+  rm -rf "${dir}"
+}
+
+#------------------------------------------------------------------------------
 echo "=== smoke: ${MODE} (ranks=${SMOKE_RANKS}, stack=${STACK})"
 
 case "${MODE}" in
@@ -82,6 +115,8 @@ case "${MODE}" in
     make -C "${SMOKE_DIR}" all
     run_serial
     run_parallel
+    run_ex4 serial
+    run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
     ;;
 
   relocated)
@@ -89,6 +124,8 @@ case "${MODE}" in
     [ -x "${SMOKE_BIN}" ] || fail "no prebuilt ${SMOKE_BIN} in the unpacked tree"
     run_serial
     run_parallel
+    run_ex4 serial
+    run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
 
     # Then, and only as a bonus, prove the relocated tree can still compile --
     # but only where that is even possible.
