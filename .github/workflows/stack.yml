@@ -54,10 +54,34 @@ on:
         default: '4'
       build_timeout_minutes:
         description: >
-          Wall-clock budget for 'make all' itself.  This is the real ceiling;
-          the job's own timeout is derived from it and is only a backstop.
+          Wall-clock budget for 'make build' -- the source packages, and the
+          long pole at ~26 min measured.  A real ceiling; the job's own timeout
+          is only a backstop.
         type: number
-        default: 150
+        default: 120
+      finish_timeout_minutes:
+        description: >
+          Wall-clock budget for the 'make all' that follows -- relocate,
+          validate, slim, dist, distcheck.  ~25 min measured, of which the ISA
+          scan is 20 on x86-64.
+        type: number
+        default: 90
+      publish_images:
+        description: >
+          Push the two intermediate builder images to GHCR, tagged by the
+          content hash of everything that produced them.  Off for pull requests
+          -- see ci.yml -- so that PRs read and only main writes.
+        type: boolean
+        default: false
+      profile_isa_scan:
+        description: >
+          Between 'make build' and 'make all', measure where relocate/
+          isa-scan.py spends its time -- objdump versus Python, threads versus
+          processes.  Off by default; it re-runs the scan several times and adds
+          minutes.  Measures only: nothing it does can change what the gate
+          reports.
+        type: boolean
+        default: false
       free_runner_space:
         description: >
           Run the disk-reclaim action before building.  It self-guards and is a
@@ -107,6 +131,10 @@ on:
 
 permissions:
   contents: read
+  # For the intermediate builder images.  A no-op unless publish_images is set,
+  # and unavailable to pull requests from forks in any case -- which is one of
+  # the reasons publishing is restricted to main.
+  packages: write
 
 jobs:
   #-----------------------------------------------------------------------------
@@ -164,8 +192,11 @@ jobs:
       MPI_FAMILY: ${{ inputs.mpi_family }}
       GLIBC_FLOOR: ${{ inputs.glibc_floor }}
       GCC_VERSION: ${{ inputs.gcc_version }}
+      HDF5_PARALLEL: ${{ inputs.hdf5_parallel }}
       BUILDKIT_PROGRESS: plain
-      ARTIFACT: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+    outputs:
+      artifact: ${{ steps.names.outputs.artifact }}
+      config: ${{ steps.names.outputs.config }}
     steps:
       - uses: actions/checkout@v7
 
@@ -183,6 +214,7 @@ jobs:
       - name: Runner facts
         env:
           BUILD_TIMEOUT: ${{ inputs.build_timeout_minutes }}
+          FINISH_TIMEOUT: ${{ inputs.finish_timeout_minutes }}
         run: |
           uname -srm
           echo "cpus: $(nproc)"
@@ -194,14 +226,45 @@ jobs:
 
           # The job's timeout-minutes is a literal 300 because GitHub
           # expressions cannot do arithmetic.  This is the assertion that keeps
-          # that literal honest: the step budget plus the conda step's 45 and a
-          # 30-minute tail for diagnostics and upload has to stay under it, or
-          # the job cancellation this whole design exists to avoid comes back.
-          echo "make all budget: ${BUILD_TIMEOUT}m, job backstop: 300m"
-          if [ "$(( BUILD_TIMEOUT + 45 + 30 ))" -ge 300 ]; then
-            echo "::error::build_timeout_minutes=${BUILD_TIMEOUT} leaves no room under the 300m job backstop"
+          # that literal honest: every step budget, plus the conda step's 45 and
+          # a 30-minute tail for diagnostics, image publish and upload, has to
+          # stay under it -- or the job cancellation this whole design exists to
+          # avoid comes back.
+          budget=$(( 45 + BUILD_TIMEOUT + FINISH_TIMEOUT + 30 ))
+          echo "budgets: conda 45m, build ${BUILD_TIMEOUT}m, finish ${FINISH_TIMEOUT}m," \
+               "+30m tail = ${budget}m against a 300m job backstop"
+          if [ "${budget}" -ge 300 ]; then
+            echo "::error::step budgets total ${budget}m, which leaves no room under the 300m job backstop"
             exit 1
           fi
+
+      # The artifact name has to distinguish every job this reusable workflow
+      # produces WITHIN ONE RUN, and until now it did not: extended.yml calls
+      # this five times, and 'fresh-solve (linux-64)' and 'builder-distro' differ
+      # only in base_image, so both computed
+      # stack-linux-64-openblas-mpich-hdf5no and the second upload would 409.
+      # Latent rather than observed -- extended.yml is weekly and this repo is
+      # days old -- but certain by construction.
+      #
+      # Computed in a step rather than in 'env:' because base_image contains ':'
+      # and can contain '/', which are not legal in an artifact name, and GitHub
+      # expressions have no string-replace function to sanitise them with.
+      - name: Names
+        id: names
+        run: |
+          slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'; }
+          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}-$(slug "${BASE_IMAGE}")"
+          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · on ${BASE_IMAGE}"
+          {
+            echo "ARTIFACT=${artifact}"
+            echo "CONFIG=${config}"
+            echo "JOB_START=$(date +%s)"
+          } >> "$GITHUB_ENV"
+          {
+            echo "artifact=${artifact}"
+            echo "config=${config}"
+          } >> "$GITHUB_OUTPUT"
+          echo "artifact: ${artifact}"
 
       - name: Build the builder image (${{ inputs.base_image }})
         working-directory: docker
@@ -214,27 +277,125 @@ jobs:
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           build make print-config
 
-      # Split out of 'make all' only when a lock refresh was asked for: the lock
-      # has to be taken while the env is still the build environment.
+      # 'make all' is run in three invocations rather than one.  The stage graph
+      # makes that exactly equivalent -- each stamp is satisfied or it is not,
+      # and a later invocation resumes rather than repeats -- and it buys two
+      # things one invocation cannot:
+      #
+      #   * a place to stand between 'build' and everything after it.  relocate
+      #     strips, slim trims and prune removes binutils outright, so the tree
+      #     as the ISA scanner sees it exists ONLY at this point.  Anything that
+      #     wants to observe or capture that state has to run here.
+      #   * honest phase boundaries in the log, and three separate step
+      #     durations in the UI instead of one 52-minute block.
+      #
       # --signal=INT, not the default TERM.  'docker compose run' treats SIGINT
       # as "stop this container", so the container is torn down and the named
       # volumes released; on TERM the CLI can exit while the container keeps
       # running, and the next step inherits a busy build root.  --kill-after is
       # the backstop for a compose that ignores the INT too.
-      - name: conda + refresh the lock
-        if: inputs.refresh_lock
+      - name: make conda
+        id: make_conda
         working-directory: docker
         run: >
           timeout --verbose --signal=INT --kill-after=2m 45m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
-          build make conda conda-lock
+          build make conda
 
-      - name: make all
+      # Two content hashes, nested: SHA_CONDA covers config plus conda/,
+      # SHA_BUILD covers that plus everything deciding what gets compiled.  See
+      # the script for why they nest.
+      - name: Inputs SHA
+        if: inputs.publish_images
+        run: .github/scripts/inputs-sha.sh >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        if: inputs.publish_images
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish the builder image
+        if: inputs.publish_images
+        continue-on-error: true
+        env:
+          STAGE: builder
+          CONFIG: ${{ env.CONFIG }}
+          GIT_SHA: ${{ github.sha }}
+          INPUTS_SHA: ${{ env.SHA_CONDA }}
+          TAG: ghcr.io/${{ github.repository }}/builder:${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-${{ env.SHA_CONDA }}
+        run: bash .github/scripts/publish-stage-image.sh
+
+      # Right after conda and before anything else, deliberately: by the end of
+      # 'make all' the env has been slimmed and pruned and the source builds
+      # have installed into it, so a lock taken then would describe the artifact
+      # rather than the environment that built it.
+      - name: Refresh the lock
+        if: inputs.refresh_lock
+        working-directory: docker
+        run: >
+          timeout --verbose --signal=INT --kill-after=2m 45m
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          build make conda-lock
+
+      - name: make build
+        id: make_build
         working-directory: docker
         run: >
           timeout --verbose --signal=INT --kill-after=2m ${{ inputs.build_timeout_minutes }}m
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          build make build
+
+      # The one that earns its keep: toolchain plus built stack, before
+      # relocate strips it, slim trims it and prune removes binutils.  A
+      # consumer pulls this, drops a package into site/, and 'make build' skips
+      # everything the stamps already account for.
+      - name: Publish the devel image
+        if: inputs.publish_images
+        continue-on-error: true
+        env:
+          STAGE: devel
+          CONFIG: ${{ env.CONFIG }}
+          GIT_SHA: ${{ github.sha }}
+          INPUTS_SHA: ${{ env.SHA_BUILD }}
+          TAG: ghcr.io/${{ github.repository }}/devel:${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-${{ env.SHA_BUILD }}
+        run: bash .github/scripts/publish-stage-image.sh
+
+      # Here and nowhere else.  'make all' runs relocate (which strips), slim
+      # (which trims) and prune (which removes binutils, so there is no objdump
+      # left at all) -- the unstripped tree the scanner actually reads exists
+      # only in this window.
+      - name: Profile the ISA scan
+        if: inputs.profile_isa_scan
+        continue-on-error: true
+        working-directory: docker
+        run: |
+          docker compose run --rm -T build bash -c '
+            mkdir -p /src/ci-diag
+            "$BUILD_ROOT/.conda/bin/python" relocate/isa-bench.py \
+              --root "$BUILD_ROOT/stack" \
+              --json /src/ci-diag/isa-bench.json
+          ' | tee "${RUNNER_TEMP}/isa-bench.txt"
+          {
+            echo "### ISA scan profile — ${CONFIG}"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/isa-bench.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: make all
+        id: make_all
+        working-directory: docker
+        run: >
+          timeout --verbose --signal=INT --kill-after=2m ${{ inputs.finish_timeout_minutes }}m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
@@ -329,6 +490,67 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The same facts as the step above, in a form the aggregating job can add
+      # up.  Written even when the build failed -- especially then, since an
+      # experimental configuration reports green and this file is the only place
+      # its real outcome survives.
+      - name: Result sidecar
+        if: always()
+        continue-on-error: true
+        env:
+          # The FIRST stage that did not succeed, not the last step's outcome.
+          # Now that the build runs in three invocations, a failure in
+          # 'make build' leaves 'make all' skipped -- and reporting "skipped"
+          # would describe the consequence rather than the cause.
+          OUTCOME: >-
+            ${{ steps.make_conda.outcome != 'success' && steps.make_conda.outcome
+             || (steps.make_build.outcome != 'success' && steps.make_build.outcome
+             || steps.make_all.outcome) }}
+          STAGE: >-
+            ${{ steps.make_conda.outcome != 'success' && 'conda'
+             || (steps.make_build.outcome != 'success' && 'build'
+             || 'all') }}
+          EXPERIMENTAL: ${{ inputs.experimental }}
+        run: |
+          mkdir -p result
+          set -- dist/*.tar.gz
+          t=''
+          if [ -e "$1" ]; then t="$1"; fi
+          man='{}'
+          if [ -n "${t}" ]; then
+            tar -xzOf "${t}" stack/etc/stack-manifest.json 2>/dev/null > /tmp/man.json || true
+            [ -s /tmp/man.json ] && man="$(cat /tmp/man.json)"
+          fi
+          jq -n \
+            --arg   config       "${CONFIG}" \
+            --arg   base         "${BASE_IMAGE}" \
+            --arg   outcome      "${OUTCOME}" \
+            --arg   stage        "${STAGE}" \
+            --argjson experimental "${EXPERIMENTAL}" \
+            --argjson seconds    "$(( $(date +%s) - JOB_START ))" \
+            --arg   tarball      "$([ -n "${t}" ] && basename "${t}" || echo '')" \
+            --arg   size         "$([ -n "${t}" ] && du -h "${t}" | cut -f1 || echo '')" \
+            --argjson manifest   "${man}" \
+            '{kind: "build", config: $config, base: $base, outcome: $outcome,
+              stage: $stage, experimental: $experimental, seconds: $seconds,
+              tarball: (if $tarball == "" then null else $tarball end),
+              size:    (if $size    == "" then null else $size    end),
+              packages:    $manifest.package_count,
+              glibc_floor: $manifest.glibc_floor_measured,
+              isa:         $manifest.isa_baseline}' \
+            > "result/build-${ARTIFACT}.json"
+          cat "result/build-${ARTIFACT}.json"
+
+      - name: Publish result sidecar
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-build-${{ env.ARTIFACT }}
+          path: result/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Publish the tarball
         if: success()
         uses: actions/upload-artifact@v7
@@ -374,14 +596,114 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+          name: ${{ needs.build.outputs.artifact }}
           path: dist
+
+      - name: Start clock
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
       # --build is not optional and not belt-and-braces: without it compose
       # reuses the image it built last and silently ignores VERIFY_IMAGE, so a
       # matrix like this one would run five green jobs against one distro.  The
       # verify service prints the distro and glibc it actually ran on; that line
       # is the check on this comment being true.
+      #
+      # 'set -o pipefail' is load-bearing now that the output is teed: the
+      # default shell here is 'bash -e {0}', without pipefail, so a failing
+      # compose piped into tee would exit 0 and this job would go green on a
+      # broken tarball.
       - name: Unpack and run on ${{ matrix.base }}
+        id: run
         working-directory: docker
-        run: docker compose run --rm --build -T verify
+        run: |
+          set -o pipefail
+          docker compose run --rm --build -T verify 2>&1 | tee "${RUNNER_TEMP}/verify.log"
+
+      - name: Result sidecar
+        if: always()
+        continue-on-error: true
+        env:
+          CONFIG: ${{ needs.build.outputs.config }}
+          ARTIFACT: ${{ needs.build.outputs.artifact }}
+          OUTCOME: ${{ steps.run.outcome }}
+          EXPERIMENTAL: ${{ inputs.experimental }}
+        run: |
+          # The verify service opens with
+          #   === verify on <PRETTY_NAME>, glibc <version>
+          # which is the distro it ACTUALLY booted, not the one we asked for --
+          # the distinction docker/bases.env's --build warning exists for.  Read
+          # it back rather than echoing the matrix value, so the sidecar records
+          # the same evidence.
+          line="$(grep -m1 '^=== verify on ' "${RUNNER_TEMP}/verify.log" 2>/dev/null || true)"
+          distro="$(printf '%s' "${line}" | sed -n 's/^=== verify on \(.*\), glibc .*/\1/p')"
+          glibc="$( printf '%s' "${line}" | sed -n 's/^.*, glibc \(.*\)$/\1/p')"
+
+          slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'; }
+          safe="$(slug "${VERIFY_IMAGE}")"
+          echo "SAFE_BASE=${safe}" >> "$GITHUB_ENV"
+
+          # The FILE name has to be unique across the whole run, not just the
+          # artifact name: 'summarise' downloads with merge-multiple, which
+          # flattens every artifact into one directory.  Both platforms verify
+          # on the same five base images, so 'verify-almalinux-9.json' collided
+          # with itself and ten sidecars rendered as five rows -- half the
+          # matrix silently missing from the table meant to show all of it.
+          mkdir -p result
+          jq -n \
+            --arg     config       "${CONFIG}" \
+            --arg     base         "${VERIFY_IMAGE}" \
+            --arg     outcome      "${OUTCOME}" \
+            --argjson experimental "${EXPERIMENTAL}" \
+            --argjson seconds      "$(( $(date +%s) - JOB_START ))" \
+            --arg     distro       "${distro}" \
+            --arg     glibc        "${glibc}" \
+            '{kind: "verify", config: $config, base: $base, outcome: $outcome,
+              experimental: $experimental, seconds: $seconds,
+              distro: (if $distro == "" then null else $distro end),
+              glibc:  (if $glibc  == "" then null else $glibc  end)}' \
+            > "result/verify-${ARTIFACT}-${safe}.json"
+          cat "result/verify-${ARTIFACT}-${safe}.json"
+
+      - name: Publish result sidecar
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-verify-${{ needs.build.outputs.artifact }}-${{ env.SAFE_BASE }}
+          path: result/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  #-----------------------------------------------------------------------------
+  # One table for the whole fan-out.
+  #
+  # This job exists because of 'continue-on-error: ${{ inputs.experimental }}'
+  # above.  extended.yml sets that on mkl, parallel HDF5 and the alternate
+  # builder distro, so a failure in any of them produces a GREEN run, and the
+  # only way to notice is to open each job.  A weekly matrix nobody opens is a
+  # weekly matrix nobody reads.
+  #
+  # if: always() and no 'needs' guard on their results, because the runs worth
+  # summarising are exactly the ones where something failed.
+  summarise:
+    needs: [plan, build, verify]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tolerated rather than required: if every job died before writing a
+      # sidecar there is nothing to download, and this job should still render
+      # "nothing was collected" instead of failing and hiding that fact too.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: result-*
+          path: result
+          merge-multiple: true
+
+      - name: Render
+        run: |
+          python3 .github/scripts/render_matrix_summary.py result \
+            | tee -a "$GITHUB_STEP_SUMMARY"

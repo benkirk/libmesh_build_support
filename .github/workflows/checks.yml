@@ -47,8 +47,12 @@ jobs:
           command -v shellcheck >/dev/null || sudo apt-get -qq install -y shellcheck
           git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
 
+      # .github/scripts/ as well as relocate/: the summary renderer runs in a
+      # job that only executes after a 50-minute build, so a syntax error there
+      # is discovered at the worst possible moment and on the run least able to
+      # afford it.
       - name: Python sources compile
-        run: python3 -m py_compile relocate/*.py
+        run: python3 -m py_compile relocate/*.py .github/scripts/*.py
 
       # The one real test that needs no build.  It exists because the x86
       # instruction patterns cannot be exercised on an aarch64 developer

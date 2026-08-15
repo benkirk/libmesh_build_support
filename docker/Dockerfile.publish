@@ -1,0 +1,67 @@
+# Turn a build root into a consumable image.
+#
+# The stack is built inside a NAMED VOLUME, not the container filesystem --
+# compose.yaml explains why, and it is the right call for the macOS loop -- so
+# 'docker commit' would capture none of it.  The build root is therefore tarred
+# out of the volume and added back here.  That keeps compose.yaml the local dev
+# loop's file rather than making it CI's, which is the whole reason the volume
+# layout looks the way it does.
+#
+# FROM the builder image rather than the bare base, so the OS prerequisites
+# Dockerfile.builder works out and installs -- curl, tar, gzip, bzip2, make,
+# findutils, which, ps, ca-certificates -- are already present and this image
+# can actually continue a build rather than merely hold the results of one.
+ARG BUILDER_IMAGE=libmesh-stack-builder:local
+FROM ${BUILDER_IMAGE}
+
+# Must match compose.yaml's BUILD_ROOT.  Passed in rather than repeated: the
+# publishing step reads it out of the running container, so there is no second
+# copy of the path to drift.
+ARG BUILD_ROOT
+
+# ADD, not COPY: both tars are extracted in place.  The build root carries
+# stack/, .conda/ and .work/stamps -- the stamps are what let a consumer run
+# 'make build' and have every package already accounted for, so only their own
+# additions compile.
+ADD build-root.tar ${BUILD_ROOT}/
+
+# 'git archive HEAD', so this is the tracked tree at the built commit: no dist/,
+# no ci-diag/, no local scratch.
+ADD repo.tar /src
+
+# Make the stamps newer than the sources they were built from.
+#
+# The stage graph is mtime-driven, and 'git archive' stamps every file with the
+# COMMIT time -- so whether 'make build' in this image resumes or rebuilds
+# PETSc, Trilinos and libMesh from scratch comes down to whether the commit
+# happens to predate the build.  It normally does, which is worse than if it
+# never did: it means the image is continuable by accident and would stop being
+# so without warning.  Verified by finding it the other way round in a local
+# test, where a build root from an earlier commit planned a full rebuild.
+#
+# Safe precisely because of how this image is named.  Its tag is the content
+# hash of everything that produced it, and the tree at /src is the same tracked
+# content that hash covers, so "the stamps are valid for these sources" is not
+# an assumption here -- it is what the tag means.  A consumer's OWN edits still
+# land with a current mtime and still rebuild what they touch, which is the
+# behaviour that has to survive.
+RUN find "${BUILD_ROOT}/.work/stamps" -type f -exec touch {} + 2>/dev/null || true
+
+ENV BUILD_ROOT=${BUILD_ROOT}
+WORKDIR /src
+
+# Provenance, in the form 'docker inspect' and the GHCR UI already understand.
+ARG STAGE
+ARG INPUTS_SHA
+ARG GIT_SHA
+ARG BUILD_DATE
+ARG CONFIG
+LABEL org.opencontainers.image.source="https://github.com/benkirk/libmesh_build_support" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="libmesh-stack ${STAGE}" \
+      org.opencontainers.image.description="${CONFIG}" \
+      dev.libmesh-stack.stage="${STAGE}" \
+      dev.libmesh-stack.inputs-sha="${INPUTS_SHA}"
+
+CMD ["/bin/bash"]

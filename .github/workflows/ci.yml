@@ -26,9 +26,17 @@ on:
           discovered to be broken on the day it is wanted.
         type: boolean
         default: false
+      profile_isa_scan:
+        description: >
+          Measure where the ISA scan spends its 20 minutes on x86-64 — objdump
+          versus Python, threads versus processes.  Adds minutes to the build
+          and changes nothing about what the gate reports.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -54,3 +62,9 @@ jobs:
       # Empty on push and pull_request, where the inputs context does not exist,
       # so || supplies the default that both of those want anyway.
       aggressive_sweep: ${{ inputs.aggressive_sweep || false }}
+      profile_isa_scan: ${{ inputs.profile_isa_scan || false }}
+      # PRs read, main writes.  A pull request can therefore never publish
+      # something another run would later consume, and fork PRs -- whose
+      # GITHUB_TOKEN is read-only and could not push anyway -- do not fail
+      # trying.  When a restore path is built, this is already the right shape.
+      publish_images: ${{ github.event_name != 'pull_request' }}
