@@ -224,7 +224,7 @@ jobs:
             # Report what the env was actually built from, not what was asked
             # for.  These are not the same thing: bootstrap.sh falls back to
             # solving when no lock exists for the configuration, and there is
-            # no linux-64 lock (A23).  An earlier version of this line printed
+            # no linux-64 lock (A37).  An earlier version of this line printed
             # the input and so claimed "from the checked-in lock" on a run that
             # had solved from scratch.
             case "${{ inputs.hdf5_parallel }}" in yes) h5=hdf5par ;; *) h5=hdf5ser ;; esac

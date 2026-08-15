@@ -227,9 +227,9 @@ watching. Three things to know about it before you push:
 
 Gaps CI cannot close for you, all recorded as amendments: `linux-64` has no
 checked-in conda lock, so the two platforms are not even building the same
-package set (A33 — `extended.yml` publishes a lock weekly; it needs committing
+package set (A37 — `extended.yml` publishes a lock weekly; it needs committing
 from a solve someone has watched succeed); `strip` takes SIGBUS on at least one
-object and `slim.sh` swallows it (A35); and neither `MPI_FAMILY=openmpi` nor
+object and `slim.sh` swallows it (A39); and neither `MPI_FAMILY=openmpi` nor
 `GLIBC_FLOOR=2.17` is wired into the matrix, because each is missing a
 prerequisite named in §S7 rather than merely unwritten.
 

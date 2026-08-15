@@ -1221,7 +1221,7 @@ have "fixed" it by installing *more* than needed — is not used.
 
 ### Observed while landing CI
 
-**A32 — a lint gate finds things, which is the point, and two of them were real.**
+**A36 — a lint gate finds things, which is the point, and two of them were real.**
 `checks.yml` runs `shellcheck --severity=warning` over every tracked script, and it
 was not green on arrival. `relocate/validate.sh`'s `soft()` helper passed `"$@ …"` —
 mixing an array expansion with a string, so with more than one argument the
@@ -1238,7 +1238,7 @@ The severity threshold is `warning` on purpose — the style tier is mostly advi
 about idioms this repo has chosen, and a gate that fires on things you intend to
 keep is a gate you learn to ignore.
 
-**A33 — `linux-64` has no checked-in lock, so its reproducibility is a claim about
+**A37 — `linux-64` has no checked-in lock, so its reproducibility is a claim about
 conda-forge rather than about this repository.** `conda/lock/` contains exactly one
 file, for `linux-aarch64`, because that is the platform the pipeline was developed on.
 `bootstrap.sh` falls back to solving from the spec when no lock exists — which is the
@@ -1260,7 +1260,7 @@ that had solved from scratch, because no `linux-64` lock exists for it to have u
 It now tests for the lock file and reports what actually happened. A status line
 that reports the request rather than the outcome is worse than no status line.
 
-**A34 — `opensuse/leap:15` has no `gzip`, and that is the verify matrix earning its
+**A38 — `opensuse/leap:15` has no `gzip`, and that is the verify matrix earning its
 keep.** The first CI run was green on eight of ten verify jobs and red on
 `opensuse/leap:15` — on *both* architectures, identically:
 
@@ -1284,7 +1284,7 @@ this?", and it was one entry short. A single-distro check could not have found i
 and `fail-fast: false` is what kept "which distro?" legible rather than cancelling
 the run at the first red job.
 
-**A35 — `strip` takes SIGBUS on at least one object, and the failure is swallowed.**
+**A39 — `strip` takes SIGBUS on at least one object, and the failure is swallowed.**
 Visible in the first CI run's `linux-64` log, mid-`slim`:
 
 ```

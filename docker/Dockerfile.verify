@@ -17,7 +17,7 @@
 # which reads like a corrupt tarball rather than a missing package.  Every base
 # image in bases.env ships gzip except opensuse/leap:15, which is exactly the
 # kind of thing a five-distro matrix exists to find and a single-distro check
-# never would.  See A34.
+# never would.  See A38.
 ARG BASE_IMAGE=almalinux:9
 FROM ${BASE_IMAGE}
 
