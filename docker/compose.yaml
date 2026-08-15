@@ -13,6 +13,11 @@
 # is unavoidable for BLAS_PROVIDER=mkl, which is x86-64 only.
 
 x-common: &common
+  # Named, so that both services share one image instead of compose building
+  # the same Dockerfile twice under two generated names, and so that anything
+  # that needs to refer to it -- Dockerfile.publish's FROM, for one -- has a
+  # stable name rather than depending on compose's <project>-<service> default.
+  image: libmesh-stack-builder:local
   build:
     context: ..
     dockerfile: docker/Dockerfile.builder

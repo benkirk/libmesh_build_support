@@ -4,3 +4,4 @@ dist/
 .git/
 site/
 config.mk
+.publish-build-root.tar

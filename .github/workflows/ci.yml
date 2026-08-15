@@ -36,6 +36,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -62,3 +63,8 @@ jobs:
       # so || supplies the default that both of those want anyway.
       aggressive_sweep: ${{ inputs.aggressive_sweep || false }}
       profile_isa_scan: ${{ inputs.profile_isa_scan || false }}
+      # PRs read, main writes.  A pull request can therefore never publish
+      # something another run would later consume, and fork PRs -- whose
+      # GITHUB_TOKEN is read-only and could not push anyway -- do not fail
+      # trying.  When a restore path is built, this is already the right shape.
+      publish_images: ${{ github.event_name != 'pull_request' }}

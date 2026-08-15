@@ -10,3 +10,6 @@ site/
 __pycache__/
 # logs and reports the CI build job copies out of the build-root volume
 ci-diag/
+
+# scratch tar the image-publishing step stages through the bind mount
+.publish-build-root.tar
