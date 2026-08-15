@@ -7,19 +7,36 @@
 #
 # Same install-only-what-is-missing approach as Dockerfile.builder, for the
 # same reason: a fixed package list picks fights with base images that already
-# satisfy it a different way.
+# satisfy it a different way.  It also means this file's package list is the
+# honest answer to "what does a customer's machine need in order to unpack and
+# run the artifact?" -- so it must name gzip as well as tar.  GNU tar does not
+# decompress; '-z' execs gzip, and where gzip is absent it fails with
+#
+#     tar (child): gzip: Cannot exec: No such file or directory
+#
+# which reads like a corrupt tarball rather than a missing package.  Every base
+# image in bases.env ships gzip except opensuse/leap:15, which is exactly the
+# kind of thing a five-distro matrix exists to find and a single-distro check
+# never would.  See A38.
 ARG BASE_IMAGE=almalinux:9
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-c"]
 
 RUN set -eo pipefail; \
-    command -v tar >/dev/null 2>&1 && { echo "==> base image already has tar"; exit 0; }; \
-    if   command -v dnf     >/dev/null 2>&1; then dnf -y install tar && dnf clean all; \
-    elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive install tar && zypper clean -a; \
-    elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y --no-install-recommends tar && rm -rf /var/lib/apt/lists/*; \
-    else echo "unsupported base image" >&2; exit 1; fi
+    have () { command -v "$1" >/dev/null 2>&1; }; \
+    need=(); \
+    have tar  || need+=(tar);          `# unpack the artifact` \
+    have gzip || need+=(gzip);         `# tar -z execs this; not built in` \
+    echo "==> verify image lacks: ${need[*]:-nothing}"; \
+    if [ ${#need[@]} -gt 0 ]; then \
+      if   command -v dnf     >/dev/null 2>&1; then dnf -y install "${need[@]}" && dnf clean all; \
+      elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive install "${need[@]}" && zypper clean -a; \
+      elif command -v apt-get >/dev/null 2>&1; then \
+        apt-get update && apt-get install -y --no-install-recommends "${need[@]}" \
+          && rm -rf /var/lib/apt/lists/*; \
+      else echo "unsupported base image" >&2; exit 1; fi; \
+    fi
 
 WORKDIR /verify
 CMD ["/bin/bash"]

@@ -77,6 +77,10 @@ above_baseline () {
   # first gets an empty value -- and under 'set -u' the subshell in it dies
   # noisily while the caller carries on with a degenerate filename.
   local dir="$1"
+  # SC2155 (assignment masks the substitution's status) does not apply: basename
+  # cannot meaningfully fail on a path we just created, and there is no status
+  # here worth preserving.  The split above is the one that matters.
+  # shellcheck disable=SC2155
   local report="${TMP}/scan-$(basename "${dir}").json"
   "${PY}" "${TOPDIR}/relocate/isa-scan.py" --root "${dir}" --out "${report}" >/dev/null 2>&1
   "${PY}" - "${report}" "${ISA_BASELINE}" "${TOPDIR}/relocate/isa-scan.py" <<'PY'

@@ -69,7 +69,7 @@ ok   () { echo "  ok    $*"; }
 # stages.  Checks that are properties of the final dependency closure are
 # advisory until the closure is final.
 soft () {
-  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$@ [advisory: pre-slim]"; fi
+  if [ "${STAGE}" = final ]; then bad "$@"; else warn "$* [advisory: pre-slim]"; fi
 }
 
 echo "=== validate (${MODE}, stage=${STAGE}) ${ROOT}"

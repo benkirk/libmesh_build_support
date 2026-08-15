@@ -60,8 +60,11 @@ while IFS= read -r f; do
   grep -q "${MARKER}" "$f" 2>/dev/null && { skipped=$((skipped + 1)); continue; }
   LC_ALL=C grep -qI . "$f" 2>/dev/null || continue          # skip binaries
   LC_ALL=C grep -q "${STACK}" "$f" 2>/dev/null || continue  # nothing to do
+  # One pattern, not four: '*sh' already matches '...bash', and '#!'* already
+  # matches '#! '*.  The other three were redundant rather than wrong, but they
+  # read as if they covered cases this one does not.
   case "$(head -c 128 "$f" | head -1)" in
-    '#!'*sh|'#!'*bash|'#! '*sh|'#! '*bash) ;;
+    '#!'*sh) ;;
     *) continue ;;                                          # not a shell script
   esac
 
@@ -213,8 +216,8 @@ while IFS= read -r f; do
   sed -i -e "s|${STACK}|${NEUTRAL}|g" "$f"
   prov_fixed=$((prov_fixed + 1))
 done < <(
-  find "${STACK}/include" -type f \( -name '*.h' -o -name '*.hpp' \) 2>/dev/null \
-    | xargs -r grep -l "${STACK}" 2>/dev/null
+  find "${STACK}/include" -type f \( -name '*.h' -o -name '*.hpp' \) -print0 2>/dev/null \
+    | xargs -0 -r grep -l "${STACK}" 2>/dev/null
   find "${STACK}/lib/petsc/conf" -type f \
        \( -name '*.py' -o -name 'configure-hash' \) 2>/dev/null
   find "${STACK}/lib/petsc/conf/modules" -type f 2>/dev/null

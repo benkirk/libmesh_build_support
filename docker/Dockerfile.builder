@@ -26,6 +26,7 @@ RUN set -eo pipefail; \
     need=(); \
     have curl  || need+=(curl);        `# fetch miniforge and source tarballs` \
     have tar   || need+=(tar);         `# unpack both` \
+    have gzip  || need+=(gzip);        `# tar execs it: every source tarball is .tar.gz, and so is ours` \
     have bzip2 || need+=(bzip2);       `# the miniforge installer needs it` \
     have make  || need+=(make);        `# drive the build` \
     have find  || need+=(findutils);   `# shell plumbing` \
