@@ -145,7 +145,7 @@ jobs:
     outputs:
       bases: ${{ steps.bases.outputs.json }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: bases
         env:
           BASES: ${{ inputs.verify_bases }}
@@ -198,7 +198,7 @@ jobs:
       artifact: ${{ steps.names.outputs.artifact }}
       config: ${{ steps.names.outputs.config }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Before anything touches Docker, because it restarts the daemon.
       - name: Free disk space
@@ -553,7 +553,7 @@ jobs:
 
       - name: Publish the tarball
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT }}
           path: dist/*.tar.gz
@@ -563,7 +563,7 @@ jobs:
       - name: Publish diagnostics
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT }}-diagnostics
           path: ci-diag/
@@ -592,11 +592,9 @@ jobs:
       SMOKE_RANKS: ${{ inputs.smoke_ranks }}
       BUILDKIT_PROGRESS: plain
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # From the build job's output rather than recomputed here, so the two can
-      # no longer disagree about what the artifact is called.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build.outputs.artifact }}
           path: dist
