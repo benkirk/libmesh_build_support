@@ -1,0 +1,50 @@
+# Keep the Actions pins from rotting quietly.
+#
+# There are nine of them across three actions and every one is on v4, while
+# upstream is at checkout v7, upload-artifact v7 and download-artifact v8 --
+# three to four majors of drift accumulated in a repository that is two days
+# old.  Nothing is broken yet; the point is that nothing announces it when it
+# does.  Deprecated Actions runtimes are retired on a schedule, and the way that
+# lands is a green pipeline turning red on a morning nobody touched it.
+#
+# Scoped to github-actions on purpose:
+#
+#   * Conda dependencies are pinned in conda/env/*.yml and resolved against a
+#     checked-in lock, and extended.yml already asks the question Dependabot
+#     would ask -- whether the spec still solves -- once a week, against a real
+#     build.  A bot opening pull requests there would be a worse version of a
+#     test we already run.
+#
+#   * The source packages under pkgs/ carry explicit versions and checksums that
+#     Dependabot cannot read, and whose upgrades are build decisions rather than
+#     dependency bumps.
+#
+#   * The docker ecosystem would not help either.  docker/Dockerfile.builder and
+#     Dockerfile.verify both take FROM ${BASE_IMAGE}, because the base image is
+#     the axis under test rather than a dependency -- docker/bases.env is where
+#     that list lives, and checks.yml already asserts the CI matrix agrees with
+#     it.  The one genuinely pinned image, rhysd/actionlint in checks.yml, is
+#     inside a run: block where no ecosystem can see it.
+#
+# One grouped pull request rather than one per action, which is both how this
+# repository prefers its work batched and the only way a version bump gets
+# exercised as a set.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      # Ahead of extended.yml's Monday 06:17 solve, so that if a bump and a
+      # conda-forge migration break in the same week they arrive as two
+      # separate red things rather than one confusing one.
+      time: '05:00'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 3
