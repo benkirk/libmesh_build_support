@@ -1,0 +1,100 @@
+# The second axis: configurations that are declared but not proven, and the
+# question a lock file cannot answer for itself.
+#
+# Weekly rather than nightly, and that is a considered choice.  Two different
+# things are being watched here and neither moves on a daily timescale:
+#
+#   * conda-forge drift.  ci.yml builds from the checked-in explicit lock, so
+#     it is reproducible and says nothing about whether conda/env/*.yml still
+#     SOLVES to something that works.  These jobs solve from the spec instead,
+#     and publish the lock the solve produced, so a migration that breaks us is
+#     found by CI rather than by the next person who adds a platform.
+#   * the knobs nobody has run.  mkl, parallel HDF5, and building on a distro
+#     other than almalinux:9 are all supported in the driver and unexercised in
+#     practice.  They are marked experimental so their failures are visible
+#     without being confused with a regression in what does work.
+#
+# Scheduled workflows are disabled by GitHub after 60 days without repository
+# activity, and re-enabled from the Actions tab.  A silent extended matrix is a
+# green extended matrix, so check the run history occasionally.
+name: extended
+
+on:
+  schedule:
+    # 06:17 on Mondays.  Off the hour deliberately: the scheduler is heavily
+    # oversubscribed at :00 and jobs queue for a long time there.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended
+  cancel-in-progress: false
+
+jobs:
+  #-----------------------------------------------------------------------------
+  # Does the spec still solve, and does what it solves to still work?
+  #
+  # refresh_lock publishes the resulting lock as an artifact.  There is a real
+  # asymmetry to be aware of: linux-aarch64 has a checked-in lock, linux-64 does
+  # not, so ci.yml's x86 build is already solving fresh every time.  Until that
+  # lock is committed, x86 reproducibility is a claim about conda-forge rather
+  # than about this repository.
+  fresh-solve:
+    strategy:
+      fail-fast: false
+      matrix:
+        target_platform: [linux-64, linux-aarch64]
+    name: fresh solve (${{ matrix.target_platform }})
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: ${{ matrix.target_platform }}
+      use_lock: false
+      refresh_lock: true
+
+  #-----------------------------------------------------------------------------
+  # MKL.  x86-only by construction -- conda/bootstrap.sh rejects it on aarch64
+  # at config time rather than deep in a solve.  The measured risk is size:
+  # the accidental MKL pull that §S1 warns about was ~560 MB, and this asks for
+  # it deliberately, so the tarball line in the job summary is the thing to read.
+  mkl:
+    name: mkl
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      blas_provider: mkl
+      experimental: true
+
+  #-----------------------------------------------------------------------------
+  # Parallel HDF5.  Not the default, and deliberately so: the mpi_* variant
+  # makes libhdf5 link libmpi, which pulls MPI into the closure of everything
+  # that touches HDF5 (A3).  Serial is what v0 shipped.  This job exists so the
+  # supported-but-unused branch of that knob does not rot.
+  #
+  # Two verify images rather than five: the glibc floor and the newest distro.
+  # If a closure change breaks relocation it breaks it on both; the middle three
+  # tell you nothing extra, and this is a second full build.
+  hdf5-parallel:
+    name: hdf5 parallel
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      hdf5_parallel: 'yes'
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true
+
+  #-----------------------------------------------------------------------------
+  # Build on a Debian-family host instead of a RHEL-family one.  The builder's
+  # glibc should not matter -- conda supplies the toolchain and the sysroot pins
+  # the floor -- and this is the job that finds out whether "should not" is
+  # "does not".  A14 is the precedent for not assuming it.
+  builder-distro:
+    name: built on ubuntu:24.04
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      base_image: ubuntu:24.04
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true
