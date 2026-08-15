@@ -17,6 +17,15 @@ on:
   pull_request:
     paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+    inputs:
+      aggressive_sweep:
+        description: >
+          Delete the runner's preinstalled toolchains before building, and
+          report what that reclaimed.  Nothing needs this today; it is here so
+          the capability can be exercised and measured on demand rather than
+          discovered to be broken on the day it is wanted.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,3 +51,6 @@ jobs:
       # the sysroot pins GLIBC_FLOOR -- but "what we verified" beats "what we
       # reason should be equivalent".  Varying it is nightly's job.
       base_image: almalinux:9
+      # Empty on push and pull_request, where the inputs context does not exist,
+      # so || supplies the default that both of those want anyway.
+      aggressive_sweep: ${{ inputs.aggressive_sweep || false }}

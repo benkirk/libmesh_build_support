@@ -1,33 +1,50 @@
 #!/usr/bin/env bash
-# Give the build room to work -- and prove it got it.
+# Reclaim runner disk.  Currently a no-op, deliberately kept, and the reason
+# for both is measured rather than assumed.
 #
-# docker/compose.yaml puts BUILD_ROOT, the conda package cache and the source
-# cache in NAMED VOLUMES rather than bind mounts, because on macOS a bind mount
-# over hundreds of thousands of files is the difference between minutes and
-# hours.  That decision is right, and it has a consequence in CI: named volumes
-# live under Docker's data root, which is /var/lib/docker on the runner's root
-# filesystem.  So every byte this build produces -- the ~2 GB build tree, the
-# conda package cache, the PETSc/Trilinos/libMesh source and build trees, and
-# the images themselves -- lands on the smallest disk the runner has.
+# THE MEASUREMENT.  This script was written expecting the runner layout it was
+# adapted from: a small root filesystem plus a large ephemeral disk at /mnt.
+# The first CI run said otherwise.  Both runner types we use present a single
+# 145 GB root filesystem, /mnt is not a separate filesystem at all, and a
+# complete build -- conda env, PETSc, Trilinos, libMesh, their source and build
+# trees, the staged stack and the tarball -- moves the needle by about 3 GB:
 #
-# GitHub's Ubuntu runners carry a second, much larger ephemeral disk mounted at
-# /mnt.  Moving Docker's data root there moves all of the above in one step,
-# which is why this script does that first and treats the rest as optional.
+#   linux-64       58G used / 87G avail  ->  61G used /  84G avail
+#   linux-aarch64  36G used / 109G avail ->  39G used / 106G avail
+#
+# The 60 GB that docker/compose.yaml warns about is a local Docker Desktop
+# figure, reflecting accumulation across many configurations rather than one
+# clean job.  Note the delta above is a NET figure sampled once at the end; the
+# high-water mark during the PETSc and Trilinos builds is not measured, and is
+# the number that would actually matter if this ever gets tight.
+#
+# WHY IT STAYS ANYWAY.  Two independent mechanisms live here, and only one of
+# them is inert:
+#
+#   * Relocating Docker's data root is inert, and not because /mnt is full --
+#     because /mnt is not its own filesystem.  It revives on a runner that has a
+#     real resource disk (self-hosted, or some larger runner classes), which is
+#     why it is guarded and skipped rather than deleted.  It has to happen
+#     before anything else touches Docker, since it restarts the daemon.
+#
+#   * The software sweep still works, because it reclaims from / directly and
+#     does not care whether /mnt exists.  It is the half with a future: stacking
+#     a second compiler family (nvhpc, oneAPI) inside the conda env would add
+#     roughly 10-15 GB of toolchain plus a second set of build trees.  Whether
+#     that ever needs this is an open question -- on the numbers above, wall
+#     clock runs out well before disk does -- so the sweep is opt-in and prints
+#     what it reclaimed, so that the first run to turn it on answers it.
 #
 # Two deliberate departures from the InstructLab/benkirk 'slim-action-runner'
 # this is adapted from:
 #
 #   * The swapfile stays.  That action reclaims /mnt/swapfile for another ~4 GB.
 #     Runners have 16 GB of RAM, Trilinos and libMesh links are the memory peak
-#     of this build, and 4 GB of disk on a 70 GB volume is not what is scarce
-#     here.  Trading swap for disk we do not need is a bad trade in exactly the
-#     job most likely to need the swap.
+#     of this build, and with 84 GB free there is nothing to buy.  Trading swap
+#     for disk we do not need is a bad trade in exactly the job most likely to
+#     need the swap.
 #
-#   * The software sweep is opt-in, not the default.  If relocating the data
-#     root is enough -- and the numbers this script prints are how we find out
-#     -- then spending 60-90 seconds per job removing the runner's JVMs and
-#     Android SDK buys nothing.  Turn it on with 'aggressive: true' once a run
-#     shows it is needed.
+#   * The sweep is opt-in rather than the default, per the numbers above.
 #
 # The failure this guards against is the quiet one.  A data-root move that
 # half-succeeds leaves Docker running against the old path, the build fills the
@@ -127,6 +144,13 @@ relocate_docker_root
 # after this point are docker, tar, jq and coreutils.
 sweep_runner_software() {
     echo "---------------------------------------------------------------- aggressive sweep"
+
+    # The whole point of running this once is to learn what it is worth, so
+    # measure it rather than quoting a number from someone else's runner image.
+    # KiB via -k, because -h rounds to a granularity coarser than the answer.
+    local before_k after_k
+    before_k="$(df -k --output=avail / | tail -1)"
+
     set -x
     sudo rm -rf \
         /opt/az \
@@ -157,6 +181,10 @@ sweep_runner_software() {
     # certainly unused, wherever the runner image happens to have put them.
     sudo find /usr /opt -type f -name 'lib*.a' -print0 2>/dev/null \
         | xargs -0 --no-run-if-empty sudo rm -f || true
+
+    sudo sync
+    after_k="$(df -k --output=avail / | tail -1)"
+    echo "  sweep reclaimed $(( (after_k - before_k) / 1024 )) MB on /"
 }
 
 case "${AGGRESSIVE}" in

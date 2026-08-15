@@ -8,21 +8,27 @@
 # to both.
 name: Free disk space
 description: >
-  Move Docker's data root onto the runner's large ephemeral disk, so that named
-  volumes -- BUILD_ROOT, the conda package cache, the source cache -- are not
-  competing for the root filesystem.  Optionally also remove runner software
-  this build never uses.
+  Reclaim runner disk: move Docker's data root onto a large ephemeral disk where
+  one exists, and optionally delete runner software this build never uses.  Both
+  halves are currently unnecessary on GitHub-hosted runners -- see the measured
+  numbers at the top of free-disk.sh -- and both are kept for the configurations
+  where they are not.
 
 inputs:
   docker-root:
-    description: Where Docker's data root should end up.
+    description: >
+      Where Docker's data root should end up, on a runner that has a separate
+      filesystem to put it on.  Skipped when there is not one, which is every
+      GitHub-hosted runner as of this writing.
     required: false
     default: /mnt/docker
   aggressive:
     description: >
       Also delete the runner's preinstalled JVMs, .NET, Android SDK and friends.
-      Off by default; turn it on only once a run shows relocating the data root
-      was not enough.
+      Off by default because the build currently uses ~3 GB of an available 84.
+      The reason to reach for it is a bigger builder -- a second compiler family
+      in the conda env, say -- and the first run that turns it on will print
+      what it reclaimed, which is the number nobody has yet.
     required: false
     default: 'false'
 

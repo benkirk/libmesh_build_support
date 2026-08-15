@@ -60,12 +60,20 @@ on:
         default: 150
       free_runner_space:
         description: >
-          Move Docker's data root onto the runner's large ephemeral disk before
-          building.  On by default because this build's working set lives in
-          named volumes, which live under that data root.  An escape hatch, not
-          a knob: turn it off to compare against a stock runner.
+          Run the disk-reclaim action before building.  It self-guards and is a
+          measured no-op on GitHub-hosted runners -- see free-disk.sh -- so this
+          stays on to keep the path exercised rather than because it is needed.
         type: boolean
         default: true
+      aggressive_sweep:
+        description: >
+          Have that action also delete the runner's preinstalled JVMs, .NET,
+          Android SDK and friends, and report what that reclaimed.  Off, because
+          a whole build currently costs ~3 GB of an available 84.  Exists to be
+          switched on from ci.yml's dispatch, either to get the number or
+          because the builder has grown enough to want it.
+        type: boolean
+        default: false
       ignore_lock:
         description: >
           Solve from the spec even where a checked-in lock exists.  The lock is
@@ -165,6 +173,8 @@ jobs:
       - name: Free disk space
         if: inputs.free_runner_space
         uses: ./.github/actions/free-disk
+        with:
+          aggressive: ${{ inputs.aggressive_sweep }}
 
       # Worth a line in every log: the build root, the conda package cache and
       # the PETSc/Trilinos build trees together are the reason Docker Desktop
