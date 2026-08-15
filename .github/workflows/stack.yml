@@ -54,10 +54,18 @@ on:
         default: '4'
       build_timeout_minutes:
         description: >
-          Wall-clock budget for 'make all' itself.  This is the real ceiling;
-          the job's own timeout is derived from it and is only a backstop.
+          Wall-clock budget for 'make build' -- the source packages, and the
+          long pole at ~26 min measured.  A real ceiling; the job's own timeout
+          is only a backstop.
         type: number
-        default: 150
+        default: 120
+      finish_timeout_minutes:
+        description: >
+          Wall-clock budget for the 'make all' that follows -- relocate,
+          validate, slim, dist, distcheck.  ~25 min measured, of which the ISA
+          scan is 20 on x86-64.
+        type: number
+        default: 90
       free_runner_space:
         description: >
           Run the disk-reclaim action before building.  It self-guards and is a
@@ -186,6 +194,7 @@ jobs:
       - name: Runner facts
         env:
           BUILD_TIMEOUT: ${{ inputs.build_timeout_minutes }}
+          FINISH_TIMEOUT: ${{ inputs.finish_timeout_minutes }}
         run: |
           uname -srm
           echo "cpus: $(nproc)"
@@ -197,12 +206,15 @@ jobs:
 
           # The job's timeout-minutes is a literal 300 because GitHub
           # expressions cannot do arithmetic.  This is the assertion that keeps
-          # that literal honest: the step budget plus the conda step's 45 and a
-          # 30-minute tail for diagnostics and upload has to stay under it, or
-          # the job cancellation this whole design exists to avoid comes back.
-          echo "make all budget: ${BUILD_TIMEOUT}m, job backstop: 300m"
-          if [ "$(( BUILD_TIMEOUT + 45 + 30 ))" -ge 300 ]; then
-            echo "::error::build_timeout_minutes=${BUILD_TIMEOUT} leaves no room under the 300m job backstop"
+          # that literal honest: every step budget, plus the conda step's 45 and
+          # a 30-minute tail for diagnostics, image publish and upload, has to
+          # stay under it -- or the job cancellation this whole design exists to
+          # avoid comes back.
+          budget=$(( 45 + BUILD_TIMEOUT + FINISH_TIMEOUT + 30 ))
+          echo "budgets: conda 45m, build ${BUILD_TIMEOUT}m, finish ${FINISH_TIMEOUT}m," \
+               "+30m tail = ${budget}m against a 300m job backstop"
+          if [ "${budget}" -ge 300 ]; then
+            echo "::error::step budgets total ${budget}m, which leaves no room under the 300m job backstop"
             exit 1
           fi
 
@@ -245,28 +257,61 @@ jobs:
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           build make print-config
 
-      # Split out of 'make all' only when a lock refresh was asked for: the lock
-      # has to be taken while the env is still the build environment.
+      # 'make all' is run in three invocations rather than one.  The stage graph
+      # makes that exactly equivalent -- each stamp is satisfied or it is not,
+      # and a later invocation resumes rather than repeats -- and it buys two
+      # things one invocation cannot:
+      #
+      #   * a place to stand between 'build' and everything after it.  relocate
+      #     strips, slim trims and prune removes binutils outright, so the tree
+      #     as the ISA scanner sees it exists ONLY at this point.  Anything that
+      #     wants to observe or capture that state has to run here.
+      #   * honest phase boundaries in the log, and three separate step
+      #     durations in the UI instead of one 52-minute block.
+      #
       # --signal=INT, not the default TERM.  'docker compose run' treats SIGINT
       # as "stop this container", so the container is torn down and the named
       # volumes released; on TERM the CLI can exit while the container keeps
       # running, and the next step inherits a busy build root.  --kill-after is
       # the backstop for a compose that ignores the INT too.
-      - name: conda + refresh the lock
-        if: inputs.refresh_lock
+      - name: make conda
+        id: make_conda
         working-directory: docker
         run: >
           timeout --verbose --signal=INT --kill-after=2m 45m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
-          build make conda conda-lock
+          build make conda
+
+      # Right after conda and before anything else, deliberately: by the end of
+      # 'make all' the env has been slimmed and pruned and the source builds
+      # have installed into it, so a lock taken then would describe the artifact
+      # rather than the environment that built it.
+      - name: Refresh the lock
+        if: inputs.refresh_lock
+        working-directory: docker
+        run: >
+          timeout --verbose --signal=INT --kill-after=2m 45m
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          build make conda-lock
+
+      - name: make build
+        id: make_build
+        working-directory: docker
+        run: >
+          timeout --verbose --signal=INT --kill-after=2m ${{ inputs.build_timeout_minutes }}m
+          docker compose run --rm -T
+          -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          build make build
 
       - name: make all
         id: make_all
         working-directory: docker
         run: >
-          timeout --verbose --signal=INT --kill-after=2m ${{ inputs.build_timeout_minutes }}m
+          timeout --verbose --signal=INT --kill-after=2m ${{ inputs.finish_timeout_minutes }}m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
@@ -369,7 +414,18 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          OUTCOME: ${{ steps.make_all.outcome }}
+          # The FIRST stage that did not succeed, not the last step's outcome.
+          # Now that the build runs in three invocations, a failure in
+          # 'make build' leaves 'make all' skipped -- and reporting "skipped"
+          # would describe the consequence rather than the cause.
+          OUTCOME: >-
+            ${{ steps.make_conda.outcome != 'success' && steps.make_conda.outcome
+             || (steps.make_build.outcome != 'success' && steps.make_build.outcome
+             || steps.make_all.outcome) }}
+          STAGE: >-
+            ${{ steps.make_conda.outcome != 'success' && 'conda'
+             || (steps.make_build.outcome != 'success' && 'build'
+             || 'all') }}
           EXPERIMENTAL: ${{ inputs.experimental }}
         run: |
           mkdir -p result
@@ -385,13 +441,14 @@ jobs:
             --arg   config       "${CONFIG}" \
             --arg   base         "${BASE_IMAGE}" \
             --arg   outcome      "${OUTCOME}" \
+            --arg   stage        "${STAGE}" \
             --argjson experimental "${EXPERIMENTAL}" \
             --argjson seconds    "$(( $(date +%s) - JOB_START ))" \
             --arg   tarball      "$([ -n "${t}" ] && basename "${t}" || echo '')" \
             --arg   size         "$([ -n "${t}" ] && du -h "${t}" | cut -f1 || echo '')" \
             --argjson manifest   "${man}" \
             '{kind: "build", config: $config, base: $base, outcome: $outcome,
-              experimental: $experimental, seconds: $seconds,
+              stage: $stage, experimental: $experimental, seconds: $seconds,
               tarball: (if $tarball == "" then null else $tarball end),
               size:    (if $size    == "" then null else $size    end),
               packages:    $manifest.package_count,
