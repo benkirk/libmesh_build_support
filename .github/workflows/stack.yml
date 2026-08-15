@@ -164,8 +164,11 @@ jobs:
       MPI_FAMILY: ${{ inputs.mpi_family }}
       GLIBC_FLOOR: ${{ inputs.glibc_floor }}
       GCC_VERSION: ${{ inputs.gcc_version }}
+      HDF5_PARALLEL: ${{ inputs.hdf5_parallel }}
       BUILDKIT_PROGRESS: plain
-      ARTIFACT: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+    outputs:
+      artifact: ${{ steps.names.outputs.artifact }}
+      config: ${{ steps.names.outputs.config }}
     steps:
       - uses: actions/checkout@v4
 
@@ -203,6 +206,34 @@ jobs:
             exit 1
           fi
 
+      # The artifact name has to distinguish every job this reusable workflow
+      # produces WITHIN ONE RUN, and until now it did not: extended.yml calls
+      # this five times, and 'fresh-solve (linux-64)' and 'builder-distro' differ
+      # only in base_image, so both computed
+      # stack-linux-64-openblas-mpich-hdf5no and the second upload would 409.
+      # Latent rather than observed -- extended.yml is weekly and this repo is
+      # days old -- but certain by construction.
+      #
+      # Computed in a step rather than in 'env:' because base_image contains ':'
+      # and can contain '/', which are not legal in an artifact name, and GitHub
+      # expressions have no string-replace function to sanitise them with.
+      - name: Names
+        id: names
+        run: |
+          slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'; }
+          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}-$(slug "${BASE_IMAGE}")"
+          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · on ${BASE_IMAGE}"
+          {
+            echo "ARTIFACT=${artifact}"
+            echo "CONFIG=${config}"
+            echo "JOB_START=$(date +%s)"
+          } >> "$GITHUB_ENV"
+          {
+            echo "artifact=${artifact}"
+            echo "config=${config}"
+          } >> "$GITHUB_OUTPUT"
+          echo "artifact: ${artifact}"
+
       - name: Build the builder image (${{ inputs.base_image }})
         working-directory: docker
         run: docker compose build build
@@ -232,6 +263,7 @@ jobs:
           build make conda conda-lock
 
       - name: make all
+        id: make_all
         working-directory: docker
         run: >
           timeout --verbose --signal=INT --kill-after=2m ${{ inputs.build_timeout_minutes }}m
@@ -329,6 +361,55 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The same facts as the step above, in a form the aggregating job can add
+      # up.  Written even when the build failed -- especially then, since an
+      # experimental configuration reports green and this file is the only place
+      # its real outcome survives.
+      - name: Result sidecar
+        if: always()
+        continue-on-error: true
+        env:
+          OUTCOME: ${{ steps.make_all.outcome }}
+          EXPERIMENTAL: ${{ inputs.experimental }}
+        run: |
+          mkdir -p result
+          set -- dist/*.tar.gz
+          t=''
+          if [ -e "$1" ]; then t="$1"; fi
+          man='{}'
+          if [ -n "${t}" ]; then
+            tar -xzOf "${t}" stack/etc/stack-manifest.json 2>/dev/null > /tmp/man.json || true
+            [ -s /tmp/man.json ] && man="$(cat /tmp/man.json)"
+          fi
+          jq -n \
+            --arg   config       "${CONFIG}" \
+            --arg   base         "${BASE_IMAGE}" \
+            --arg   outcome      "${OUTCOME}" \
+            --argjson experimental "${EXPERIMENTAL}" \
+            --argjson seconds    "$(( $(date +%s) - JOB_START ))" \
+            --arg   tarball      "$([ -n "${t}" ] && basename "${t}" || echo '')" \
+            --arg   size         "$([ -n "${t}" ] && du -h "${t}" | cut -f1 || echo '')" \
+            --argjson manifest   "${man}" \
+            '{kind: "build", config: $config, base: $base, outcome: $outcome,
+              experimental: $experimental, seconds: $seconds,
+              tarball: (if $tarball == "" then null else $tarball end),
+              size:    (if $size    == "" then null else $size    end),
+              packages:    $manifest.package_count,
+              glibc_floor: $manifest.glibc_floor_measured,
+              isa:         $manifest.isa_baseline}' \
+            > "result/build-${ARTIFACT}.json"
+          cat "result/build-${ARTIFACT}.json"
+
+      - name: Publish result sidecar
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-build-${{ env.ARTIFACT }}
+          path: result/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Publish the tarball
         if: success()
         uses: actions/upload-artifact@v4
@@ -372,16 +453,111 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # From the build job's output rather than recomputed here, so the two can
+      # no longer disagree about what the artifact is called.
       - uses: actions/download-artifact@v4
         with:
-          name: stack-${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-hdf5${{ inputs.hdf5_parallel }}
+          name: ${{ needs.build.outputs.artifact }}
           path: dist
+
+      - name: Start clock
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
 
       # --build is not optional and not belt-and-braces: without it compose
       # reuses the image it built last and silently ignores VERIFY_IMAGE, so a
       # matrix like this one would run five green jobs against one distro.  The
       # verify service prints the distro and glibc it actually ran on; that line
       # is the check on this comment being true.
+      #
+      # 'set -o pipefail' is load-bearing now that the output is teed: the
+      # default shell here is 'bash -e {0}', without pipefail, so a failing
+      # compose piped into tee would exit 0 and this job would go green on a
+      # broken tarball.
       - name: Unpack and run on ${{ matrix.base }}
+        id: run
         working-directory: docker
-        run: docker compose run --rm --build -T verify
+        run: |
+          set -o pipefail
+          docker compose run --rm --build -T verify 2>&1 | tee "${RUNNER_TEMP}/verify.log"
+
+      - name: Result sidecar
+        if: always()
+        continue-on-error: true
+        env:
+          CONFIG: ${{ needs.build.outputs.config }}
+          OUTCOME: ${{ steps.run.outcome }}
+          EXPERIMENTAL: ${{ inputs.experimental }}
+        run: |
+          # The verify service opens with
+          #   === verify on <PRETTY_NAME>, glibc <version>
+          # which is the distro it ACTUALLY booted, not the one we asked for --
+          # the distinction docker/bases.env's --build warning exists for.  Read
+          # it back rather than echoing the matrix value, so the sidecar records
+          # the same evidence.
+          line="$(grep -m1 '^=== verify on ' "${RUNNER_TEMP}/verify.log" 2>/dev/null || true)"
+          distro="$(printf '%s' "${line}" | sed -n 's/^=== verify on \(.*\), glibc .*/\1/p')"
+          glibc="$( printf '%s' "${line}" | sed -n 's/^.*, glibc \(.*\)$/\1/p')"
+
+          slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'; }
+          safe="$(slug "${VERIFY_IMAGE}")"
+          echo "SAFE_BASE=${safe}" >> "$GITHUB_ENV"
+
+          mkdir -p result
+          jq -n \
+            --arg     config       "${CONFIG}" \
+            --arg     base         "${VERIFY_IMAGE}" \
+            --arg     outcome      "${OUTCOME}" \
+            --argjson experimental "${EXPERIMENTAL}" \
+            --argjson seconds      "$(( $(date +%s) - JOB_START ))" \
+            --arg     distro       "${distro}" \
+            --arg     glibc        "${glibc}" \
+            '{kind: "verify", config: $config, base: $base, outcome: $outcome,
+              experimental: $experimental, seconds: $seconds,
+              distro: (if $distro == "" then null else $distro end),
+              glibc:  (if $glibc  == "" then null else $glibc  end)}' \
+            > "result/verify-${safe}.json"
+          cat "result/verify-${safe}.json"
+
+      - name: Publish result sidecar
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-verify-${{ needs.build.outputs.artifact }}-${{ env.SAFE_BASE }}
+          path: result/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  #-----------------------------------------------------------------------------
+  # One table for the whole fan-out.
+  #
+  # This job exists because of 'continue-on-error: ${{ inputs.experimental }}'
+  # above.  extended.yml sets that on mkl, parallel HDF5 and the alternate
+  # builder distro, so a failure in any of them produces a GREEN run, and the
+  # only way to notice is to open each job.  A weekly matrix nobody opens is a
+  # weekly matrix nobody reads.
+  #
+  # if: always() and no 'needs' guard on their results, because the runs worth
+  # summarising are exactly the ones where something failed.
+  summarise:
+    needs: [plan, build, verify]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tolerated rather than required: if every job died before writing a
+      # sidecar there is nothing to download, and this job should still render
+      # "nothing was collected" instead of failing and hiding that fact too.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: result-*
+          path: result
+          merge-multiple: true
+
+      - name: Render
+        run: |
+          python3 .github/scripts/render_matrix_summary.py result \
+            | tee -a "$GITHUB_STEP_SUMMARY"
