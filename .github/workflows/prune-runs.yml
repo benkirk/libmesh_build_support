@@ -1,0 +1,57 @@
+# Keep the run list readable.  §hygiene, not §cost -- the repository is public,
+# so minutes and artifact storage are free, and the tarballs expire on their own
+# via retention-days.  What accumulates is the list itself: one pull request
+# puts eleven checks in it, and a history nobody can scan is a history nobody
+# reads.
+#
+# Monthly on a schedule, and on demand.  One file rather than the two callers
+# the pattern usually comes with, because the only difference between them is
+# two argument values and a default.
+#
+# The manual path defaults to a DRY RUN.  Deleting run history is not
+# reversible, so the button that does it should not be the one you press first.
+# The scheduled path is not a dry run -- a cron that only ever reports what it
+# would have done is a cron that never does anything.
+name: prune runs
+
+on:
+  schedule:
+    # 04:23 on the 11th.  Off the hour for the same reason extended.yml is: the
+    # scheduler is heavily oversubscribed at :00 and jobs queue there.
+    - cron: '23 4 11 * *'
+  workflow_dispatch:
+    inputs:
+      days_ago:
+        description: Delete completed runs older than this many days.
+        type: string
+        default: '60'
+      dry_run:
+        description: List what would be deleted, and stop.
+        type: boolean
+        default: true
+
+# The whole point of the workflow.  Nothing else here needs any scope, and
+# actions: write on the built-in token is what lets this carry no secret.
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: prune-runs
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # || rather than a literal, because on a schedule there are no inputs
+          # at all and both of these arrive empty.
+          DAYS_AGO: ${{ inputs.days_ago || '60' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: bash .github/scripts/prune-runs.sh
