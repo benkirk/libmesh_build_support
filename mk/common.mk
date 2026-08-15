@@ -29,6 +29,12 @@ RPATH_MODE      ?= rpath
 # Ampere); it excludes Cortex-A72/A53/A57, i.e. Raspberry Pi 4 class hardware.
 ISA_BASELINE_X86     ?= x86-64-v2
 ISA_BASELINE_AARCH64 ?= armv8.1-a
+# What the compiler wrappers do when a build asks for '-march=native'.  'error'
+# by default: the baseline we append afterwards would neutralise it anyway, so
+# stopping is about visibility -- a build detecting the host CPU is rarely doing
+# it in only one place.  'warn' to get past it.  See wrappers/generate.sh.
+WRAPPER_ON_NATIVE ?= error
+USE_WRAPPERS      ?= yes
 SLIM_PROFILE    ?= devel
 SHIP_PYTHON     ?= no
 SMOKE_RANKS     ?= 4
@@ -88,6 +94,8 @@ PKG_ENV = \
   BLAS_PROVIDER='$(BLAS_PROVIDER)' \
   MPI_FAMILY='$(MPI_FAMILY)' \
   RPATH_MODE='$(RPATH_MODE)' \
+  ISA_BASELINE='$(ISA_BASELINE)' \
+  USE_WRAPPERS='$(USE_WRAPPERS)' \
   TOPDIR='$(CURDIR)'
 
 #-------------------------------------------------------------------------------

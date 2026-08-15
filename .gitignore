@@ -5,3 +5,6 @@ config.mk
 _root/
 dist/
 site/
+
+# importlib byproduct of wrappers/selftest.sh loading relocate/isa-scan.py
+__pycache__/

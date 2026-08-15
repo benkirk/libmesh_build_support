@@ -37,8 +37,9 @@ sets.
 ## `build.sh` contract
 
 Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
-`TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `TOPDIR`, and
-its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` / `PKG_DIR`.
+`TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `ISA_BASELINE`,
+`USE_WRAPPERS`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
+`PKG_DIR`.
 
 Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
 which is what keeps a shared build host usable.
@@ -58,6 +59,12 @@ Two rules that matter:
    later in `relocate/patchelf.sh`. Do not try to inject `$ORIGIN` at configure
    time — libtool mangles it, and a normalization pass exists precisely so you
    don't have to fight that.
+3. **Do not set `-march` yourself.** `activate_toolchain` puts the ISA wrappers
+   ahead of everything on `PATH`, and they append `-march=$ISA_BASELINE` after
+   whatever your build system passes — because `-march` is last-wins and
+   `CFLAGS` are injected first. Anything you set will simply lose. If your
+   package needs a *higher* baseline, raise `ISA_BASELINE`; that is a decision
+   about the whole artifact, not about one package. See `wrappers/README.md`.
 
 Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
 

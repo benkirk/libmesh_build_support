@@ -56,6 +56,20 @@ activate_toolchain () {
   export LDFLAGS="-L${STACK}/lib -Wl,-rpath,${STACK}/lib ${LDFLAGS:-}"
   export CPPFLAGS="-I${STACK}/include ${CPPFLAGS:-}"
   export PKG_CONFIG_PATH="${STACK}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+  # The ISA wrappers go on LAST, so they sit ahead of $STACK/bin -- including
+  # ahead of anything the activate.d scripts just prepended.  That ordering is
+  # the mechanism: CC/CXX/FC arrive from conda as bare triplet names, so PATH
+  # decides which binary they mean.  See wrappers/generate.sh.
+  local wbin="${WORK}/wrappers/bin"
+  if [ "${USE_WRAPPERS:-yes}" = yes ] && [ -d "${wbin}" ]; then
+    export PATH="${wbin}:${PATH}"
+    # shellcheck disable=SC1091
+    [ -r "${WORK}/wrappers/env.sh" ] && . "${WORK}/wrappers/env.sh"
+    log "ISA wrappers active: ${wbin}"
+  else
+    log "ISA wrappers NOT active (USE_WRAPPERS=${USE_WRAPPERS:-yes})"
+  fi
 }
 
 # download_src URL [SHA256] -- cached, resumable, unpacked into $BUILD_TMP.
