@@ -208,25 +208,30 @@ by a clean `make all` with it copied into `site/`, and anything installed into
 `distcheck` also now unpacks under a path containing a **space** and runs the
 tree **read-only**.
 
-**CI is already in place** (§S7), so the source recipes land into a matrix that
-is watching. Two things to know about it before you push:
+**CI is in place** (§S7), so the source recipes land into a matrix that is
+watching. Three things to know about it before you push:
 
 - `ci.yml` runs `make all` on **both** target platforms for every PR, then
   unpacks that tarball on five base images. A PETSc or Trilinos recipe that
-  builds on your Mac and not on a runner is now a red job rather than a
-  discovery six weeks later — but it also means a build that takes an hour per
-  architecture will show up as a slow PR. If the source builds push past the
-  120-minute job timeout in `stack.yml`, raise it there rather than trimming
-  the matrix.
+  builds on your Mac and not on a runner is a red job rather than a discovery
+  six weeks later — and it is what re-runs the `linux-64` column that the
+  source builds have not yet been verified against.
+- **Runners have 4 cores.** The job timeout is 180 min, which is generous
+  against a clean source build (~12 min on 12 cores), but the number that will
+  bite first is the ISA scan: it was **18 of the 21 minutes** of the first
+  x86 conda-only build, and the source builds only add objects to it. If build
+  time becomes a problem, that is where to look — not at the matrix width.
 - The compiler wrapper is exactly what the ISA gate is watching for, and the
   gate runs inside `make all`. If the wrapper's last-wins injection loses to
   Kokkos, CI says so on both architectures before it reaches a customer.
 
-Two gaps CI cannot close for you, both recorded as amendments: `linux-64` has
-no checked-in conda lock (A23 — `extended.yml` publishes one weekly, it needs
-committing from a solve someone has watched succeed), and neither
-`MPI_FAMILY=openmpi` nor `GLIBC_FLOOR=2.17` is wired into the matrix, because
-each is missing a prerequisite named in §S7 rather than merely unwritten.
+Gaps CI cannot close for you, all recorded as amendments: `linux-64` has no
+checked-in conda lock, so the two platforms are not even building the same
+package set (A33 — `extended.yml` publishes a lock weekly; it needs committing
+from a solve someone has watched succeed); `strip` takes SIGBUS on at least one
+object and `slim.sh` swallows it (A35); and neither `MPI_FAMILY=openmpi` nor
+`GLIBC_FLOOR=2.17` is wired into the matrix, because each is missing a
+prerequisite named in §S7 rather than merely unwritten.
 
 Two things from PR 3 worth carrying forward:
 

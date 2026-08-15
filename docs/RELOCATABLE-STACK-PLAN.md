@@ -594,6 +594,25 @@ forces the solve path, and `refresh_lock` publishes the lock that solve produced
 Neither exclusion is a technical obstacle — both are a missing prerequisite, named,
 so that adding the axis means satisfying it rather than rediscovering it.
 
+#### What the first run measured
+
+Worth keeping, because it decides where the next optimisation goes and it is not
+where anyone would guess. On a 4-vCPU runner, conda-only:
+
+| | linux-64 | linux-aarch64 |
+|---|---|---|
+| build job, end to end | 21 min | 4.5 min |
+| of which `isa-scan` | **18 min** (873 objects) | — |
+| env | solved fresh, 86 pkgs pre-slim | from the lock, 58 pkgs |
+| verify jobs | ~60 s each | ~35 s each |
+
+**The ISA scan is 85% of the x86 build**, and that is before the source builds add
+their objects. It disassembles every ELF with `objdump`, which is inherently serial
+per object and parallel only across them, so it scales with `--jobs` and the runner
+has four. Two things follow: the gap between the platforms above is mostly package
+count and lock-vs-solve (A33), not architecture; and if build time becomes a problem,
+the scan is the thing to attack — not the matrix width, where the temptation will be.
+
 #### What CI cannot tell us
 
 Worth stating so a green matrix is not read as more than it is. The runners are
@@ -1202,31 +1221,85 @@ have "fixed" it by installing *more* than needed — is not used.
 
 ### Observed while landing CI
 
-**A22 — a lint gate finds things, which is the point, and one of them was real.**
+**A32 — a lint gate finds things, which is the point, and two of them were real.**
 `checks.yml` runs `shellcheck --severity=warning` over every tracked script, and it
 was not green on arrival. `relocate/validate.sh`'s `soft()` helper passed `"$@ …"` —
 mixing an array expansion with a string, so with more than one argument the
 `[advisory: pre-slim]` suffix attaches to the last argument rather than to the
 message (SC2145). Every current call site passes a single string, so it has never
-misbehaved; it was a trap laid for the next caller. The other two were cosmetic:
-`fixup-text.sh` matched four shebang patterns where one suffices (`'#!'*sh` already
-covers `'#! '*bash`), which read as covering cases it did not, and
-`lib/build_common.sh` needed a directive for sourcing conda's generated activation
-scripts. The severity threshold is `warning` deliberately — the style tier is mostly
-advice about idioms this repo has chosen on purpose, and a gate that fires on things
-you intend to keep is a gate you learn to ignore.
+misbehaved; it was a trap laid for the next caller. The second real one arrived with
+the source builds: `fixup-text.sh` feeds `find … | xargs grep -l` over
+`$STACK/include`, which breaks on any header whose path contains whitespace
+(SC2038) — `-print0`/`-0` now. Two were not defects: `fixup-text.sh` matched four
+shebang patterns where one suffices (`'#!'*sh` already covers `'#! '*bash`), which
+read as covering cases it did not, and `wrappers/selftest.sh` and
+`lib/build_common.sh` each needed a directive where the code was already deliberate.
+The severity threshold is `warning` on purpose — the style tier is mostly advice
+about idioms this repo has chosen, and a gate that fires on things you intend to
+keep is a gate you learn to ignore.
 
-**A23 — `linux-64` has no checked-in lock, so its reproducibility is a claim about
+**A33 — `linux-64` has no checked-in lock, so its reproducibility is a claim about
 conda-forge rather than about this repository.** `conda/lock/` contains exactly one
 file, for `linux-aarch64`, because that is the platform the pipeline was developed on.
 `bootstrap.sh` falls back to solving from the spec when no lock exists — which is the
 right behaviour, and it means `ci.yml`'s x86 build re-solves on every run and will
-change underneath us at some point without anything saying so. `extended.yml`'s
-`refresh_lock` publishes the lock a fresh solve produced, for both platforms, so
-closing this is a matter of downloading that artifact and committing it. Recorded
-rather than fixed here because a lock generated on a runner and committed unverified
-would be worse than the gap: it should be committed from a solve someone has watched
-`make all` succeed against.
+change underneath us at some point without anything saying so.
+
+The first CI run made the gap concrete and larger than "reproducibility": the two
+platforms did not build the same package set. `linux-aarch64` created its env from
+the lock and validated **58 packages**; `linux-64` solved fresh and reached the
+pre-slim gate with **86**. Whatever else that is, it is not the same artifact with a
+different `-march`. `extended.yml`'s `refresh_lock` publishes the lock a fresh solve
+produced, for both platforms, so closing this is a matter of downloading that
+artifact and committing it — from a solve someone has watched `make all` succeed
+against, rather than lifted off a runner unverified.
+
+It also produced a small lesson about reporting. The build job's summary line
+originally printed the *input* — "env from the checked-in lock" — on the very run
+that had solved from scratch, because no `linux-64` lock exists for it to have used.
+It now tests for the lock file and reports what actually happened. A status line
+that reports the request rather than the outcome is worse than no status line.
+
+**A34 — `opensuse/leap:15` has no `gzip`, and that is the verify matrix earning its
+keep.** The first CI run was green on eight of ten verify jobs and red on
+`opensuse/leap:15` — on *both* architectures, identically:
+
+```
+=== verify on openSUSE Leap 15.6, glibc 2.38
+unpacking libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.tar.gz …
+tar (child): gzip: Cannot exec: No such file or directory
+```
+
+`Dockerfile.verify` installed `tar` and nothing else, on the reasoning that
+unpacking a tarball is all that image has to do. But GNU `tar` does not decompress:
+`-z` execs `gzip`, and every other base image in `bases.env` happens to ship it. The
+artifact was never implicated — it was never unpacked.
+
+Both Dockerfiles now name `gzip`, because both need it: the builder untars `.tar.gz`
+sources for PETSc, Trilinos and libMesh and *writes* a `.tar.gz` in `make dist`, so
+`BASE_IMAGE=opensuse/leap:15` would have failed on the first source download for the
+same reason. That is the more useful form of the finding: the package list in these
+files is the honest answer to "what does a machine need to build, unpack and run
+this?", and it was one entry short. A single-distro check could not have found it,
+and `fail-fast: false` is what kept "which distro?" legible rather than cancelling
+the run at the first red job.
+
+**A35 — `strip` takes SIGBUS on at least one object, and the failure is swallowed.**
+Visible in the first CI run's `linux-64` log, mid-`slim`:
+
+```
+relocate/slim.sh: line 135: 85226 Bus error (core dumped)
+  "${STRIP}" --strip-unneeded "$f" 2> /dev/null
+```
+
+The loop continues, 532 objects strip successfully, and nothing downstream notices —
+so the build is green and one object is silently unstripped. This is the same family
+as A16, where `patchelf` died on the three files it had itself mapped, and the fix
+there was to patch a copy and `rename(2)` it in. Not fixed here: which object, and
+whether it is the same hardlink-from-the-package-cache mechanism, wants
+investigating rather than guessing, and the honest interim position is that the
+build tolerates a crashing `strip` without saying so. `slim.sh` should at minimum
+count and report them.
 
 ---
 
