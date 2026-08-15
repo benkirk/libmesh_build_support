@@ -1056,6 +1056,55 @@ Carrying those checks across *and looking at what they said* is what surfaced
 it. It is also the argument for the smoke test ending at `introduction_ex4`
 rather than at something that only proves the libraries link.
 
+**A34 — a `grep -l` behind `xargs` truncated its own work list, silently and
+non-deterministically. CI found it; repeated local runs did not.** The first CI
+run of the full pipeline failed identically on both platforms with five files
+still naming the build prefix:
+
+```
+lib/libnetcdf.settings
+lib/petsc/conf/modules/petsc/3.20.5
+lib/petsc/conf/configure-hash
+lib/petsc/conf/uninstall.py
+lib/petsc/conf/reconfigure-arch-linux-c-opt.py
+```
+
+`fixup-text.sh` reported **13** provenance files fixed in CI against **18**
+locally — and 18 − 13 is exactly those five. The provenance list is built by a
+process substitution whose first generator was a pipeline:
+
+```sh
+find "${STACK}/include" … -print0 | xargs -0 -r grep -l "${STACK}"
+```
+
+The tree holds **4828** matching headers, so `xargs` runs `grep` in several
+batches. A batch matching nothing makes that `grep` exit 1, which makes **`xargs`
+exit 123**. The script runs under `set -euo pipefail`, the subshell inherits it,
+and a non-zero pipeline there kills the subshell — so the three *remaining*
+generators never ran. Measured:
+
+```
+pipeline exit=0 123 0        # find, xargs, (subshell)
+with pipefail, exit=123
+```
+
+Whether it trips depends on where the batch boundary happens to fall, which is
+precisely why local runs escaped it. The same hazard was latent in the make
+generator, which has both a `grep -v` (exits 1 if it filters everything out) and
+a trailing `ls` of files that need not exist.
+
+Fixed by using a single `grep -rl` instead of `find | xargs grep -l` — no
+batching, so no 123 to begin with — and `|| true` on every generator in both
+lists. `fixup-text.sh` now also re-scans the families it claims to have fixed and
+fails naming the file, rather than letting the omission surface as a `validate`
+failure two stages and twenty minutes later.
+
+Two things worth keeping from this. **A list-building failure is invisible by
+construction**: nothing errors, you simply get less work done, and the eventual
+symptom points at the files rather than at the generator. And it is the argument
+for the CI matrix paying for itself on its first green-ish run — this had
+survived four clean local `make all` cycles.
+
 **A32 — the relocatable make fragments cannot handle a space in the install
 path, and nothing can make them.** `distcheck` now unpacks under `.../a b/c`,
 and the first run found this. GNU make's path functions are *list* functions:
