@@ -134,6 +134,27 @@ Do not re-discover these.
   wrong distro. The verify service prints the distro and glibc it actually ran
   on — check that line.
 
+- **Nothing is re-runnable over its own output — including a single package.**
+  `make all` rewrites `$STACK` in place (A20), and a *source package* cannot be
+  rebuilt over its own previous install either (A30): libMesh installs a bundled
+  Boost subset into `$STACK/include`, and on a second pass `contrib/metaphysicl`
+  finds `boost/version.hpp`, decides Boost is available, and dies on the
+  `boost/chrono.hpp` that subset lacks. Incremental rebuilds are for diagnosis;
+  the build that counts starts from a clean `$STACK`.
+- **A checked-in lock silently shadows `conda/bootstrap.sh`'s spec list.** That
+  is what a lock is for, and it cost two build cycles: editing the specs changes
+  nothing, with no warning, and the package you added is simply not there. Use
+  `make conda IGNORE_LOCK=1`, then `make conda-lock` to refreeze.
+- **Build tools are pinned to the era of the sources they build**, not to the
+  newest: `cmake<4` (CMake 4 hard-errors on Trilinos 14-4-0's
+  `cmake_minimum_required(VERSION 2.6)`), `python<3.13` (PETSc 3.20.5's
+  configure imports `xdrlib`, removed in 3.13), and `diffutils` (PETSc's
+  configure needs `diff`). All three are on `prune.list`, so none is visible in
+  the artifact — which is what makes the pins cheap.
+- **v0's download URLs are not all alive.** PETSc's `ftp.mcs.anl.gov` was
+  retired by ANL; snapshots are at `web.cels.anl.gov`. libMesh **1.7.6 has no
+  release tarball at all** — only 1.7.8 and 1.7.9 in that series do — hence
+  `LIBMESH_VERSION = 1.7.9`.
 - **Never request the bare `libblas`/`liblapack` metapackages.** They drag in
   ~560 MB of MKL alongside the openblas actually selected. Use `libopenblas`
   plus `blas=*=openblas`.
@@ -153,38 +174,23 @@ Do not re-discover these.
 
 ## Where to pick up
 
-**PR 3 — source compiles.** Three commit groups, in this order:
-
-1. **The compiler wrapper layer**, before any package uses it. Build-time only:
-   wrappers live outside the shipped tree and go on `PATH` ahead of
-   `$STACK/bin` during source builds. They append `-march=$(ISA_BASELINE)`
-   **last** — that is the entire point, since `-march` is last-wins on a gcc
-   command line and `CFLAGS` are injected first, so nothing set through the
-   environment can beat a build system that appends its own. They must also
-   hard-error on `-march=native` rather than silently correcting it.
-
-   Precedent is [NCAR/ncarcompilers](https://github.com/NCAR/ncarcompilers);
-   adapt rather than vendor — it assumes NCAR's module environment.
-
-   Traps to expect: avoid recursion (exec the real compiler by absolute path,
-   or keep the wrapper dir off `PATH` at that moment); stay silent on stdout,
-   because configure runs thousands of compile tests and parses their output;
-   pass `-v`/`--version`/`-print-*` through untouched, since PETSc introspects
-   the compiler; and do **not** wrap `mpicc` as well as `cc` — mpicc already
-   calls the wrapped `cc`, so wrapping both double-injects.
-
-2. **PETSc**, then **Trilinos** (no longer depends on PETSc — that dependency
-   existed only to scavenge `libfblas.a`, so the two build concurrently), then
-   **libMesh**. Port from `git show v0-static-stack:petsc/build.sh` and friends.
-
-3. **The smoke example** grows: PETSc `VecCreate`, then libMesh, culminating in
-   `introduction_ex4`.
-
-The ISA gate is what will tell you whether the wrapper's last-wins injection
-actually won — particularly against Kokkos, which autodetects the host
-architecture and arrives with Trilinos.
+**PR 3 — source compiles — is done.** The compiler wrapper layer, PETSc 3.20.5,
+Trilinos 14-4-0 and libMesh 1.7.9 all build, and the smoke harness now ends at
+`introduction_ex4` in 1D/2D/3D, serial and on N ranks, in place and again from
+the relocated tree.
 
 **Then:** PR 4 = `site/` extension hooks and docs; PR 5 = the CI matrix.
+
+Two things from PR 3 worth carrying forward:
+
+- **The ISA wrapper held against real code.** After PETSc, the only objects in
+  `$STACK/lib` above `armv8.1-a` were conda's own prebuilts (`libgcc_s`,
+  `libcrypto`, `libopenblas`). Nothing built from source exceeded the baseline,
+  across six `--download-` TPLs with six different build systems. Kokkos never
+  got the chance to prove the harder case — it stays off at 14-4-0 (A12).
+- **The version pins inherited from v0 are claims about the past.** Two of three
+  download URLs were dead, and three build tools had moved out from under the
+  pinned sources. Expect the same when the pins are next bumped.
 
 ## Layout
 
@@ -193,11 +199,12 @@ Makefile  mk/          driver: knobs, discovery, stage targets
 config.mk.example      copy to config.mk (gitignored)
 profiles/              version sets: default, stable, bleeding
 conda/                 bootstrap, env specs, locks, prune.list
-pkgs/                  source recipes; _template/ to copy
+wrappers/              build-time compiler wrappers: the ISA cap + its self-test
+pkgs/                  source recipes: petsc, trilinos, libmesh; _template/ to copy
 site/                  YOUR recipes — gitignored, auto-discovered
 hooks/                 pre-/post- stage injection points
-relocate/              patchelf, fixup, prune, slim, validate  (stubs)
-test/                  smoke harness + relocation proof        (stubs)
+relocate/              patchelf, fixup, prune, slim, validate, isa-scan
+test/                  smoke harness + relocation proof
 docker/                the dev loop; CI reuses these files
 ```
 

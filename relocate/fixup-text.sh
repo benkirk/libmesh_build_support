@@ -221,15 +221,22 @@ done < <(
   ls "${STACK}/lib/libnetcdf.settings" 2>/dev/null
 )
 
-# Whatever is left naming the BUILD ROOT -- the build tree, not the prefix --
-# in any text file.  These survive the passes above because the passes only
-# substitute $STACK, and $BUILD_ROOT/.work has no relocatable equivalent.
+# References to the BUILD TREE -- $BUILD_ROOT/.work and $BUILD_ROOT/.conda --
+# which name directories that are never shipped under any name, so there is
+# nothing to make them relative to.
+#
+# Restricted to those two subdirectories ON PURPOSE.  $STACK is itself
+# $BUILD_ROOT/stack, so a sweep over the whole of $BUILD_ROOT matches every
+# prefix path in the tree and neutralises paths the passes above are supposed to
+# rewrite relatively -- 460 files on the first attempt, against the ~11 that
+# actually needed it.  Blunt instruments here do not fail loudly; they quietly
+# replace working configuration with a placeholder.
 if [ -n "${BUILD_ROOT:-}" ] && [ "${BUILD_ROOT}" != "${STACK}" ]; then
   while IFS= read -r f; do
     LC_ALL=C grep -qI . "$f" 2>/dev/null || continue
-    sed -i -e "s|${BUILD_ROOT}[^\"'[:space:]]*|${NEUTRAL}|g" "$f"
+    sed -i -E "s|${BUILD_ROOT}/\.(work|conda)[^\"'[:space:]]*|${NEUTRAL}|g" "$f"
     prov_fixed=$((prov_fixed + 1))
-  done < <(LC_ALL=C grep -rl "${BUILD_ROOT}" "${STACK}" 2>/dev/null || true)
+  done < <(LC_ALL=C grep -rlE "${BUILD_ROOT}/\.(work|conda)" "${STACK}" 2>/dev/null || true)
 fi
 
 #------------------------------------------------------------------------------

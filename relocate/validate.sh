@@ -114,15 +114,16 @@ fi
 #
 # Asking make what it got is the only form of this check that means anything,
 # and it costs one process.
+# $(info) fires while make PARSES, so the probe needs no recipe and no tab, and
+# an unbuildable goal is fine -- we have the answer before make gives up.  The
+# '|| true' matters: this runs under 'set -e', and make exiting non-zero here
+# must not take the whole validator with it.
 ex4mk="${ROOT}/examples/introduction/ex4/Makefile"
 if [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
-  got="$(cd "$(dirname "${ex4mk}")" \
-         && make -f - <<EOF 2>/dev/null
-include Makefile
-all:
-	@echo \$(LIBMESH_DIR)
-EOF
-  )"
+  got="$( cd "$(dirname "${ex4mk}")" \
+          && printf 'include Makefile\n$(info __LMD=$(LIBMESH_DIR))\n' \
+             | make -f - -n __libmesh_probe 2>/dev/null \
+             | sed -n 's/^__LMD=//p' | head -1 )" || got=''
   if [ "${got}" = "${ROOT}" ]; then
     ok "example Makefiles resolve LIBMESH_DIR to the tree they are in"
   else

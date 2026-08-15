@@ -849,6 +849,194 @@ at 14-4-0 for now, so this is the first thing to test when the Trilinos recipe
 lands; the fallback is to bump Trilinos alone. `-DTPL_ENABLE_DLlib=OFF` was a
 static-era flag and must flip to `ON`.
 
+### Observed while landing the source compiles
+
+**A22 — the wrapper has to cover bare `cc`, and that is a correctness matter.**
+The wrapper layer was specified as covering conda's compilers. conda installs
+only *triplet-named* ones (`aarch64-conda-linux-gnu-gcc`), and the builder image
+has its own system `gcc`. So a build system falling back to plain `cc` or `gcc`
+— and plenty do — would have compiled against the **host** toolchain: host
+libstdc++, host glibc headers, no baseline. It would have linked, and it would
+have run on the build machine. `generate.sh` therefore emits bare aliases too,
+pointing at the conda compilers; our `cc` being first on `PATH` is what keeps
+that fallback inside the stack.
+
+Also settled while building it: `mpicc` is **not** wrapped (it invokes the
+already-wrapped triplet compiler, so wrapping both double-injects), but whether
+`mpicc` resolves that compiler through `PATH` or by absolute path is mpich's
+choice, so `env.sh` sets `MPICH_CC`/`OMPI_CC` as a second route and the
+self-test compiles *through* `mpicc` rather than assuming either.
+
+**A23 — build tools must be pinned to the era of the sources, not to the
+newest.** Three failures, all of the same shape, all before a single line of
+our own code compiled:
+
+- **CMake 4** removed compatibility with `cmake_minimum_required(VERSION <3.5)`
+  and hard-errors on it. Trilinos 14-4-0 still declares 2.6, 2.6.4, 2.7, 2.8.4,
+  2.8.8, 3.0 and 3.1 across its sub-projects, so CMake 4 cannot configure it at
+  all. Pinned `cmake<4`.
+- **Python 3.13** removed `xdrlib` from the standard library. PETSc 3.20.5's
+  configure imports it and died with `No module named 'xdrlib'`. Pinned
+  `python<3.13`.
+- **`diffutils`** was simply absent: PETSc's configure stops with *"Could not
+  locate diff executable"*. It belongs in the conda env rather than in
+  `Dockerfile.builder`, because the conda env *is* the toolchain — `make`,
+  `cmake` and `pkg-config` already come from there, and the builder image is
+  deliberately as poor as a customer's host.
+
+None of these is visible in the artifact: all three are on `prune.list` and are
+gone before packing. That is what makes them cheap — pinning a build tool is not
+a statement about what the stack supports.
+
+**A24 — a checked-in lock silently shadows the spec list.** This cost two build
+cycles. `conda/bootstrap.sh` prefers `conda/lock/*.lock` when one exists, which
+is exactly what a lock is for; the consequence is that editing the `specs` array
+changes *nothing*, with no warning, and the package you added is simply not
+there. Now `IGNORE_LOCK=1` forces a fresh solve, and the lock path prints a line
+saying it is ignoring the spec list.
+
+**A25 — the v0 pins are not all obtainable.** Two of the three download URLs
+carried over from v0 are dead, which is worth stating plainly: version pins
+inherited from a retired build system are claims about the past, not guarantees
+about the present.
+
+- **PETSc**'s `ftp.mcs.anl.gov` host has been retired by ANL and 404s for every
+  version. Release snapshots moved to `web.cels.anl.gov`.
+- **libMesh 1.7.6 cannot be downloaded.** The tag exists, but libMesh publishes
+  dist tarballs for only a subset of tags, and in the whole 1.7 series only
+  1.7.8 and 1.7.9 have release assets. `LIBMESH_VERSION` moves to **1.7.9** —
+  the nearest obtainable release in the same series, forced by availability
+  rather than chosen. Building 1.7.6 would mean an unbootstrapped tag archive
+  plus autoconf/automake/libtool in the env, which is a larger deviation, not a
+  smaller one.
+
+**A26 — GCC 14 broke the pinned TPL sources, not our code.** `--download-scalapack`
+fails outright: GCC 14 promoted implicit function declarations from a warning to
+an error, and ScaLAPACK's BLACS is pre-C99 and full of them (`BI_imvcopy`,
+`BI_TransDist`, …). PETSc's `--CFLAGS` gains `-Wno-implicit-function-declaration`
+and `--FFLAGS` gains the gfortran-10+ counterpart `-fallow-argument-mismatch`.
+These reach every `--download-` package, which is the point: PETSc passes its
+flags down to each TPL's own build system, and the TPLs are the old code. Both
+restore behaviour a newer compiler changed; neither is a choice about how PETSc
+is built.
+
+**A29 — libMesh's contrib exodus can never write an ExodusII file when built
+with `--enable-hdf5`.** Two defects in the release tarball combine:
+
+1. `configure` sets `NETCDF_INCLUDE="-I$(top_srcdir)/contrib/netcdf/v4/include"`
+   — **`top_srcdir` only**. The build tree's `include/`, where the netcdf
+   sub-configure writes the `netcdf_meta.h` it just generated, is never on the
+   include path.
+2. The tarball ships a *checked-in* `netcdf_meta.h` in that source directory,
+   next to the `netcdf_meta.h.in` configure expands, saying `NC_HAS_NC4 0` and
+   `NC_HAS_HDF5 0`.
+
+So `contrib/exodus` always compiles believing netcdf has no HDF5, however netcdf
+was actually built — and ours is built with it (`libnetcdf.settings` reports
+*"NetCDF-4 API: yes"*; the installed `netcdf_meta.h` says `NC_HAS_HDF5 1`; a
+direct `nc_create(..., NC_NETCDF4)` succeeds).
+
+The consequence is not subtle. `ex_utils.c` gates on `#if !NC_HAS_HDF5`, and
+`ExodusII_IO_Helper::create` selects `EX_NETCDF4|EX_NOCLASSIC` unconditionally
+under `--enable-hdf5` — there is no runtime override. Exodus then refuses every
+one: *"File format specified as netcdf-4, but the NetCDF library being used was
+not configured to enable this format"*. `introduction_ex4` solves correctly and
+dies on output.
+
+Deleting the stale header does **not** fix it — measured. With `NETCDF_INCLUDE`
+pointing only at `top_srcdir`, the include path has nowhere correct to fall
+through to. The recipe instead copies the sub-configure's *generated*
+`netcdf_meta.h` over the checked-in one after configuring, and refuses to build
+if that file is missing or itself reports no HDF5. Using configure's own answer
+rather than hardcoded values means it stays right if the HDF5 knob changes.
+
+This is worth stating plainly: v0 had the same configuration and the same
+defect, and never knew, because its example checks ran without `|| exit 1`.
+Carrying those checks across *and looking at what they said* is what surfaced
+it. It is also the argument for the smoke test ending at `introduction_ex4`
+rather than at something that only proves the libraries link.
+
+**A31 — source packages bring build-integration metadata, and it bakes the
+prefix in formats the text fixup did not cover.** A conda-only tree had none of
+these. The three source packages install **115** text files naming the build
+root — measured, and all 115 source-installed, zero conda-owned, so nothing in
+the conda handling regressed. They fall into three groups:
+
+- **105 resolvable configuration files** — 83 GNU make fragments (libMesh's
+  example Makefiles, `Make.common`, PETSc's `lib/petsc/conf/*`) and 18 CMake
+  package configs (Trilinos, Sacado, Teuchos, superlu, scalapack). These are how
+  a customer builds against the stack, so they get the same treatment §S4 already
+  applies to `.pc` files and shell wrappers: the idiom the consuming tool already
+  has — `$(dir $(realpath $(lastword $(MAKEFILE_LIST))))` for make,
+  `${CMAKE_CURRENT_LIST_DIR}` for cmake.
+- **1 shell script** — `contrib/bin/libtool`; the wrapper pass simply was not
+  looking in `contrib/bin`.
+- **~11 provenance strings** with no relative form at all — `PETSC_MPICC_SHOW`,
+  `LIBMESH_CONFIGURE_INFO`, `libnetcdf.settings`, PETSc's configure hash. A C
+  `#define` cannot be made self-locating, so these are neutralised rather than
+  rewritten, which is the call already made for `H5pubconf.h`. A stale absolute
+  path invites a consumer to resolve it and silently get nothing; a visible
+  placeholder says what happened.
+
+**Two things this cost, both worth remembering.**
+
+The injected variable is numbered per file. These fragments include one another,
+and `LIBMESH_DIR ?= $(...)` is *recursively* expanded — a shared variable name
+would let the last fragment parsed decide what every earlier one meant.
+
+And `$(realpath ...)` is load-bearing. libMesh installs `Make.common` at
+`etc/libmesh/Make.common` **and symlinks it as `<prefix>/Make.common`**, which is
+the path the examples actually include. Without `realpath`,
+`$(dir $(lastword $(MAKEFILE_LIST)))` yields the *symlink's* directory, so a
+depth computed for `etc/libmesh/` climbed two levels too far and every
+`LIBMESH_DIR` resolved to `/opt`. **The residue scan was perfectly happy** — the
+build prefix was gone. That is the whole lesson of this project in one bug, so
+`validate.sh` now asks `make` what `LIBMESH_DIR` actually evaluates to and
+compares it to the tree it is standing in.
+
+**A30 — a source package cannot be rebuilt over its own previous install.**
+A20 recorded that the *pipeline* is not re-runnable over its output. The same is
+true one level down, for a reason worth naming separately: a package that
+installs headers into the shared prefix changes the answers `configure` gets the
+next time round.
+
+libMesh installs its bundled Boost subset to `$STACK/include/boost`. On a second
+`make build` into the same prefix, `contrib/metaphysicl`'s configure finds
+`boost/version.hpp` (1_61), concludes Boost is available, and then dies on
+`cannot find boost/chrono.hpp` — which that subset does not contain. A clean
+prefix has no Boost at all, so metaphysicl correctly skips it.
+
+Nothing is wrong with the recipe; the prefix is simply not re-entrant, because
+`activate_toolchain` puts `-I$STACK/include` on the compile line and that is
+exactly what makes HDF5 and PETSc findable. Iterating on a single source package
+therefore means removing that package's installed files first, or starting from
+a fresh prefix. The practical rule: **incremental rebuilds are for diagnosis;
+the only build that counts is one from a clean `$STACK`.**
+
+**A28 — "sealed after `make conda`" was a rule with nothing enforcing it, and
+it destroyed a completed build.** F9 named this hazard during review and it was
+left as a convention. It is not one: `conda create -p $STACK` does not ask
+whether the prefix already holds anything, and `conda.stamp` depends on
+`conda/bootstrap.sh` — so *editing bootstrap.sh* marks the conda stage out of
+date, and the next `make build` recreates the env before rebuilding. A finished
+PETSc install (8510 files, twenty-five minutes) was lost this way while adding
+one package to the spec list. The stamp dependency is correct; the action was
+not.
+
+`bootstrap.sh` now leaves an existing env alone. When `etc/source-files.txt`
+shows source builds have installed into it, it says so and stops; re-creating
+is `CONDA_RECREATE=1` or `make distclean`. This is also why the manifest from
+A10 is worth having twice over: it is what lets the seal know the prefix is not
+merely populated but *unreproducible without a rebuild*.
+
+**A27 — libtool `.la` files have to be removed by the recipe.** `validate.sh`
+rejects them because they record the absolute prefix and absolute paths to
+dependencies, so a relocated tree carries them pointing at a directory that no
+longer exists. Every autotools package installs them by default, so
+`remove_libtool_archives` lives in `lib/build_common.sh` and libMesh calls it
+after `make install`. Nothing links against them — the `.so` and the `.pc` carry
+what a consumer needs.
+
 ### Observed while landing the conda stage
 
 **A13 — `GCC_VERSION` does not control the shipped C++ runtime.** The solved env
