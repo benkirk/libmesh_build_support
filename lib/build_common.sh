@@ -90,3 +90,73 @@ download_src () {
 }
 
 clean_build_tmp () { rm -rf "${BUILD_TMP}"; }
+
+# Libtool .la files record the absolute path of the prefix they were installed
+# into, plus absolute paths to their dependencies.  A relocated tree carries
+# them around pointing at a directory that no longer exists, which is why
+# relocate/validate.sh rejects them outright.  Every autotools package installs
+# them by default, so any recipe using autotools should call this after
+# 'make install'.  Nothing links against them -- the .so and the .pc file carry
+# everything a consumer needs.
+remove_libtool_archives () {
+  local n
+  n=$(find "${STACK}" -name '*.la' -type f -print -delete 2>/dev/null | wc -l)
+  [ "${n}" -gt 0 ] && log "removed ${n} libtool .la file(s)"
+  return 0
+}
+
+#------------------------------------------------------------------------------
+# Source-install manifest -- amendment A10.
+#
+# relocate/prune.sh removes build-only conda packages by their conda-meta file
+# lists.  A source package that overwrites a conda-owned path would lose that
+# file when its original owner is pruned: conda still claims it, we deleted it,
+# nothing notices until the tree is unpacked somewhere else and a library is
+# missing.  So every source build records what it put in $STACK, and prune.sh
+# treats those paths as untouchable.
+#
+# This runs from an EXIT trap rather than being called at the end of each
+# recipe.  A recipe author who forgets loses the protection silently, and
+# "silently" is the whole problem -- the failure would surface much later, in
+# the artifact, as a missing file nobody deleted on purpose.  Recording on
+# failure too is deliberate: a partial install is still files on disk.
+_SRC_MANIFEST="${STACK}/etc/source-files.txt"
+_SRC_BEFORE="${WORK}/manifest/${PKG_NAME}.before"
+
+_stack_files () {
+  [ -d "${STACK}" ] || return 0
+  find "${STACK}" -mindepth 1 \( -type f -o -type l \) -printf '%P\n' 2>/dev/null \
+    | LC_ALL=C sort
+}
+
+_record_source_install () {
+  local rc=$?
+  [ -s "${_SRC_BEFORE}" ] || return "${rc}"
+  local after="${WORK}/manifest/${PKG_NAME}.after"
+  _stack_files > "${after}" 2>/dev/null || return "${rc}"
+
+  mkdir -p "$(dirname "${_SRC_MANIFEST}")"
+  local n tmp="${WORK}/manifest/${PKG_NAME}.merged"
+  # The temp file is assembled OUTSIDE $STACK on purpose: the mtime sweep below
+  # walks $STACK, so a partially-written manifest sitting in there gets swept
+  # into itself.  (Measured -- the first run recorded exactly one path, its own
+  # scratch file.)
+  #
+  # comm -13: lines only in 'after' -- what this package added.  Files it
+  # OVERWROTE do not appear, and overwriting a conda-owned path is the case
+  # this manifest exists for, so those are caught by mtime instead.
+  {
+    [ -f "${_SRC_MANIFEST}" ] && cat "${_SRC_MANIFEST}"
+    LC_ALL=C comm -13 "${_SRC_BEFORE}" "${after}"
+    ( cd "${STACK}" && find . -newer "${_SRC_BEFORE}" \( -type f -o -type l \) \
+        -printf '%P\n' 2>/dev/null )
+  } | grep -v '^etc/source-files\.txt' | LC_ALL=C sort -u > "${tmp}"
+  mv -f "${tmp}" "${_SRC_MANIFEST}"
+  n=$(wc -l < "${_SRC_MANIFEST}")
+  log "recorded source-installed paths; ${n} total in etc/source-files.txt"
+  return "${rc}"
+}
+
+mkdir -p "${WORK}/manifest"
+_stack_files > "${_SRC_BEFORE}" 2>/dev/null || true
+trap _record_source_install EXIT
