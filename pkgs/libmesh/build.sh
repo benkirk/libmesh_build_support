@@ -85,10 +85,16 @@ export PETSC_ARCH=""
 #
 # That is why introduction_ex4 solves correctly and then dies on output.
 #
-# Copy configure's own answer over the stale one rather than hardcoding values:
+# Why copy rather than delete: netcdf.h defines NC_HAVE_META_H, so exodusII.h
+# reaches its '#include "netcdf_meta.h"' unconditionally.  Removing the file
+# either breaks the compile or lets some other copy on the include path decide,
+# and '#if !NC_HAS_HDF5' reads an undefined macro as 0 either way.  Checked
+# against the preprocessor: shipped 0/0 refuses, deleted refuses, 1/1 accepts.
+#
+# And why copy the GENERATED one rather than seding 1 into the shipped one:
 # whatever the sub-configure decided about HDF5 is by definition what the netcdf
-# being built supports.  Deleting the stale file instead does NOT work -- the
-# include path has nowhere else correct to fall through to.
+# being built supports, so this stays correct if the HDF5 knob changes, and is a
+# no-op against a git checkout where the header is already right.
 gen="contrib/netcdf/v4/include/netcdf_meta.h"
 [ -f "${gen}" ] || { echo "no generated ${gen}; libMesh's contrib layout changed" >&2; exit 1; }
 grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${gen}" \

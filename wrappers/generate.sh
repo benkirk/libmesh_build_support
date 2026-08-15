@@ -173,13 +173,17 @@ done
 #------------------------------------------------------------------------------
 # Bare aliases, when conda did not provide them.
 #
-# This is not a convenience.  The builder image has a system gcc, so a build
-# system that falls back to plain 'cc' or 'gcc' -- and plenty do -- would
-# silently compile against the HOST toolchain: host libstdc++, host glibc
-# headers, none of the baseline.  It would link, it would run on the build
-# machine, and it would be exactly the kind of defect this project exists to
-# make impossible.  Putting our own 'cc' first on PATH means the fallback lands
-# on the conda compiler instead of off the edge of the stack.
+# conda ships ONLY triplet-named compilers, so a build system that falls back to
+# plain 'cc' or 'gcc' -- and plenty do -- has nothing to land on inside the
+# stack.  What it lands on instead is whatever the base image provides, and
+# docker/bases.env makes that a knob.
+#
+# The current almalinux:9 builder has no cc, gcc, c++ or clang at all (checked),
+# so there the fallback is a loud "command not found".  On an image that does
+# ship a compiler the same fallback compiles against the HOST toolchain -- host
+# libstdc++, host glibc headers, none of the baseline -- and links, and runs on
+# the build machine.  Providing our own 'cc' first on PATH makes the outcome
+# independent of which base image someone points this at.
 for pair in "cc:gcc" "gcc:gcc" "c++:g++" "g++:g++" "gfortran:gfortran"; do
   alias_name="${pair%%:*}" family="${pair##*:}"
   [ -e "${BIN}/${alias_name}" ] && continue

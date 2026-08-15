@@ -29,11 +29,18 @@ recipe.
 The compilers, under both conda's triplet names and bare `cc` / `gcc` / `c++` /
 `g++` / `gfortran`.
 
-The bare aliases are not a convenience. The builder image has its own system
-gcc, so a build system falling back to plain `cc` would otherwise compile
-against the **host** toolchain — host libstdc++, host glibc headers, no
-baseline. It would link, and it would run on the build machine. Our `cc` being
-first on `PATH` means that fallback lands on the conda compiler instead.
+The bare aliases matter because conda ships **only** triplet-named compilers, so
+a build system falling back to plain `cc` or `gcc` has nothing to land on inside
+the stack. What it lands on instead depends entirely on the base image, and
+`docker/bases.env` makes that a knob.
+
+On the current `almalinux:9` builder there is no `cc`, `gcc`, `c++` or `clang`
+at all (checked), so the fallback would be a loud "command not found" rather
+than a silent wrong answer. On an image that *does* ship a compiler — and
+plenty do — the same fallback would quietly compile against the host toolchain:
+host libstdc++, host glibc headers, no baseline. It would link, and it would run
+on the build machine. Providing our own `cc` first on `PATH` makes that
+independent of which base image someone points this at.
 
 **`mpicc` and friends are deliberately not wrapped.** `mpicc` invokes the
 triplet-named compiler, which is already wrapped; wrapping both would inject

@@ -951,9 +951,25 @@ one: *"File format specified as netcdf-4, but the NetCDF library being used was
 not configured to enable this format"*. `introduction_ex4` solves correctly and
 dies on output.
 
-Deleting the stale header does **not** fix it — measured. With `NETCDF_INCLUDE`
-pointing only at `top_srcdir`, the include path has nowhere correct to fall
-through to. The recipe instead copies the sub-configure's *generated*
+**Deleting the stale header is not the simpler fix, and cannot be.** That was
+tried first and measured not to work; the reason first written down here — "the
+include path has nowhere correct to fall through to" — was an inference, and the
+real one is better. `netcdf.h` defines `NC_HAVE_META_H`, so `exodusII.h` reaches
+its `#include "netcdf_meta.h"` unconditionally. Removing the file therefore
+either breaks the compile outright or lets some other copy on the include path
+decide, and `#if !NC_HAS_HDF5` treats an undefined macro as 0 either way.
+Checked against the preprocessor directly, with the shipped header, with it
+deleted, and with git's values:
+
+| `netcdf_meta.h` | verdict |
+|---|---|
+| tarball, `0`/`0` | exodus refuses netcdf-4 |
+| deleted | exodus refuses netcdf-4 |
+| git's `1`/`1` | exodus accepts |
+
+The remaining choice is *where the right answer comes from*, and only two exist:
+hardcode `1` before configure, or read what the sub-configure decided. The
+recipe copies the sub-configure's *generated*
 `netcdf_meta.h` over the shipped one after configuring, and refuses to build if
 that file is missing or itself reports no HDF5. Using configure's own answer
 rather than hardcoded values means it stays right if the HDF5 knob changes —
