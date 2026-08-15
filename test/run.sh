@@ -18,6 +18,20 @@ SMOKE_RANKS="${SMOKE_RANKS:-4}"
 SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/smoke" && pwd)"
 SMOKE_BIN="${STACK}/libexec/smoke"
 EX4_BIN="${STACK}/libexec/introduction_ex4"
+# The extension point: any package -- including one from site/ -- that installs
+# an executable into $STACK/libexec/stack-tests/ gets run by this harness, in
+# place and again from the relocated tree, with no edit here.  A customer
+# proving their own code survives relocation should not have to patch the test
+# suite to do it.
+#
+# Its own directory, NOT libexec/ itself: libexec is shared with conda packages,
+# and rdma-core ships an executable 'truescale-serdes.cmds' there.  Running
+# everything in libexec found it immediately and failed the suite -- a useful
+# reminder that no directory in this prefix belongs to us alone.
+SITE_BIN_DIR="${STACK}/libexec/stack-tests"
+SITE_BINS=()
+while IFS= read -r b; do SITE_BINS+=("$b"); done < <(
+  find "${SITE_BIN_DIR}" -maxdepth 1 -type f -perm -u+x 2>/dev/null | sort)
 
 # The contract this harness supplies to test/smoke/Makefile.
 export STACK
@@ -119,7 +133,34 @@ run_ex4 () {
 }
 
 #------------------------------------------------------------------------------
+# Extra executables from libexec/, run serially and under mpiexec.
+#
+# The assertion is deliberately weak -- exit 0, and something on stdout -- because
+# this harness cannot know what a customer's program prints.  What it DOES know,
+# and what is worth checking, is that the binary loads: every library resolved,
+# from wherever the tree now lives.  A program that runs at all here has proved
+# the thing this project is about.
+run_site_bins () {
+  local label="$1"; shift
+  local b out
+  [ "${#SITE_BINS[@]}" -gt 0 ] || return 0
+  for b in "${SITE_BINS[@]}"; do
+    echo "--- $(basename "${b}") ${label}"
+    out=$( "$@" "${b}" 2>&1 ) || { echo "${out}" | tail -20; fail "$(basename "${b}") exited non-zero"; }
+    [ -n "${out}" ] || fail "$(basename "${b}") produced no output"
+    echo "${out}" | sed 's/^/    /'
+  done
+}
+
+#------------------------------------------------------------------------------
 echo "=== smoke: ${MODE} (ranks=${SMOKE_RANKS}, stack=${STACK})"
+# 'if', not '[ ] && echo': as the last command in a list under 'set -e', a false
+# test makes the whole && return non-zero and takes the script with it -- and
+# the empty case here is the NORMAL one, so that would have failed every run
+# that had no site package.
+if [ "${#SITE_BINS[@]}" -gt 0 ]; then
+  echo "    extra libexec binaries: ${SITE_BINS[*]##*/}"
+fi
 
 case "${MODE}" in
   inplace)
@@ -129,6 +170,8 @@ case "${MODE}" in
     run_parallel
     run_ex4 serial
     run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
+    run_site_bins serial
+    run_site_bins "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
     ;;
 
   relocated)
@@ -138,6 +181,8 @@ case "${MODE}" in
     run_parallel
     run_ex4 serial
     run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
+    run_site_bins serial
+    run_site_bins "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
 
     # Then, and only as a bonus, prove the relocated tree can still compile --
     # but only where that is even possible.

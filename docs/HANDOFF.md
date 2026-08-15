@@ -127,8 +127,9 @@ and 3D, serial and on 4 ranks, writing ExodusII output — from a prebuilt binar
 in a tree with no compiler.
 
 **Open PRs, stacked:** #4 (conda & packaging infrastructure) → `main`,
-#5 (ISA baseline gate) → #4, and the source compiles → #5. Merge in that order;
-GitHub retargets each automatically.
+#5 (ISA baseline gate) → #4, #7 (source compiles) → #5, and #6 (the CI
+workflows) → #7. Merge in that order; GitHub retargets each one automatically
+as the one below it lands.
 
 ## Gotchas already paid for
 
@@ -151,6 +152,11 @@ Do not re-discover these.
   wrong distro. The verify service prints the distro and glibc it actually ran
   on — check that line.
 
+- **A space in the install path breaks the make fragments, and cannot be fixed.**
+  GNU make's path functions are list functions, so `$(dir …)`/`$(abspath …)`
+  split on the space. Binaries, `.pc` files and `libmesh-config` are unaffected;
+  libMesh's example Makefiles and PETSc's `lib/petsc/conf/*` are not. Install
+  somewhere without spaces if you build against the stack with make.
 - **Nothing is re-runnable over its own output — including a single package.**
   `make all` rewrites `$STACK` in place (A20), and a *source package* cannot be
   rebuilt over its own previous install either (A30): libMesh installs a bundled
@@ -196,7 +202,36 @@ Trilinos 14-4-0 and libMesh 1.7.9 all build, and the smoke harness now ends at
 `introduction_ex4` in 1D/2D/3D, serial and on N ranks, in place and again from
 the relocated tree.
 
-**Then:** PR 4 = `site/` extension hooks and docs; PR 5 = the CI matrix.
+**S6 is done too** — `examples/site-package/` is a real, tracked package proven
+by a clean `make all` with it copied into `site/`, and anything installed into
+`$STACK/libexec/stack-tests/` is exercised by `distcheck` automatically.
+`distcheck` also now unpacks under a path containing a **space** and runs the
+tree **read-only**.
+
+**CI is in place** (§S7), so the source recipes land into a matrix that is
+watching. Three things to know about it before you push:
+
+- `ci.yml` runs `make all` on **both** target platforms for every PR, then
+  unpacks that tarball on five base images. A PETSc or Trilinos recipe that
+  builds on your Mac and not on a runner is a red job rather than a discovery
+  six weeks later — and it is what re-runs the `linux-64` column that the
+  source builds have not yet been verified against.
+- **Runners have 4 cores.** The job timeout is 180 min, which is generous
+  against a clean source build (~12 min on 12 cores), but the number that will
+  bite first is the ISA scan: it was **18 of the 21 minutes** of the first
+  x86 conda-only build, and the source builds only add objects to it. If build
+  time becomes a problem, that is where to look — not at the matrix width.
+- The compiler wrapper is exactly what the ISA gate is watching for, and the
+  gate runs inside `make all`. If the wrapper's last-wins injection loses to
+  Kokkos, CI says so on both architectures before it reaches a customer.
+
+Gaps CI cannot close for you, all recorded as amendments: `linux-64` has no
+checked-in conda lock, so the two platforms are not even building the same
+package set (A37 — `extended.yml` publishes a lock weekly; it needs committing
+from a solve someone has watched succeed); `strip` takes SIGBUS on at least one
+object and `slim.sh` swallows it (A39); and neither `MPI_FAMILY=openmpi` nor
+`GLIBC_FLOOR=2.17` is wired into the matrix, because each is missing a
+prerequisite named in §S7 rather than merely unwritten.
 
 Two things from PR 3 worth carrying forward:
 
@@ -222,7 +257,8 @@ site/                  YOUR recipes — gitignored, auto-discovered
 hooks/                 pre-/post- stage injection points
 relocate/              patchelf, fixup, prune, slim, validate, isa-scan
 test/                  smoke harness + relocation proof
-docker/                the dev loop; CI reuses these files
+docker/                the dev loop; CI runs these same files
+.github/workflows/     fast gate, build-once-verify-everywhere, weekly extras
 ```
 
 Generated at runtime, none of it tracked:

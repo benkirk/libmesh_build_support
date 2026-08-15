@@ -537,20 +537,91 @@ time is not worth it when a later normalization pass exists.
 - **Verify:** add a throwaway package in `site/` and confirm it builds, gets
   patchelf'd, and survives `distcheck`.
 
-### S7 — CI matrix (follow-on, deliberately loose)
-A GitHub Actions matrix over minimal base images — a couple of AlmaLinux variants,
-openSUSE Leap, and two Ubuntu LTS — running the same `make all distcheck` in a
-container with no dev packages installed. **Reuses S0b's `docker/` directory
-directly**: same `Dockerfile.builder`/`Dockerfile.verify`, same `bases.env` matrix
-list, so a green local `compose run verify` means something about CI rather than being
-a parallel implementation that drifts. The point is not to build the stack on each
-distro; it is to **build once and validate the same tarball everywhere**, so the split
-is a build job publishing an artifact plus a fan-out of consume-and-test jobs — which
-is exactly S0b's `build`/`verify` service split, scaled out. A
-second axis over `GLIBC_FLOOR ∈ {2.17, 2.28}`, `BLAS_PROVIDER ∈ {openblas, mkl}`, and
-`MPI_FAMILY ∈ {mpich, openmpi}` — the last of which is where OpenMPI's container
-launch quirks will surface, so it wants real images rather than a local check.
-Shape this against the owner's other repo before writing it.
+### S7 — CI matrix
+The shape is the one this section always described — **build once, validate the same
+tarball everywhere** — because that is what the artifact's claim actually is. A build
+job publishes a tarball; a fan-out of consume-and-test jobs unpacks that one tarball on
+a pristine, poorer image and runs it. That is S0b's `build`/`verify` service split
+scaled out, and it is implemented by *invoking* those services rather than by
+reimplementing them: every job below shells out to `docker compose` against
+`docker/compose.yaml`, so the builder image, the verify image, the volume layout and
+the verify command are the ones a developer exercises locally. There is no second
+description of the pipeline to keep in sync.
+
+| workflow | trigger | cost | what it answers |
+|---|---|---|---|
+| `checks.yml` | every push and PR | ~2 min | does it parse, does the stage graph still order itself, do the ISA regexes still match what they claim, does each base image still build |
+| `ci.yml` | PRs and `main`, excluding doc-only changes | ~30 min ×2 | the default configuration — openblas, mpich, serial HDF5 — on `linux-64` **and** `linux-aarch64`, verified on all five base images |
+| `stack.yml` | called, never triggered directly | — | the build-and-verify implementation, parameterised |
+| `extended.yml` | weekly, and on demand | hours | the axes below |
+
+Four decisions worth recording:
+
+**`docker/bases.env` is read, not transcribed.** `docker/bases.sh --json` emits the
+image list and the verify matrix expands from it, so adding a distro to the local loop
+adds it to CI in the same commit. A list copied into a workflow file is a list that
+drifts the first time someone updates one copy. (`checks.yml`'s image-build matrix is
+the one place the list is duplicated — GitHub will not let a job compute its own
+matrix — so that job asserts its copy matches `bases.env` rather than trusting it to.)
+
+**Both target platforms build natively.** `linux-aarch64` gets an `ubuntu-24.04-arm`
+runner, not QEMU: it is a shipping target, and it is where the interesting findings
+have come from — the `armv8.1-a` floor was measured there. Under emulation the ISA
+scan alone, which disassembles every ELF object, would dominate the run.
+
+**The fast gate is separate from the expensive one, and runs on everything.** Most
+mistakes in this repo — a script that does not parse, a stage graph that stops
+ordering itself, an ISA regex that matches a symbol name — are catchable in two
+minutes without building anything. A1 was exactly that class of break, and
+`make -n all` under `-j8` is what catches it. Spending 30 minutes of matrix to
+discover a syntax error trains people to ignore CI.
+
+**`ci.yml` builds from the checked-in lock; `extended.yml` solves from the spec.**
+A lock is reproducible precisely because it never re-solves, so it can never tell us
+that `conda/env/*.yml` has stopped resolving to something that works. `CONDA_USE_LOCK=no`
+forces the solve path, and `refresh_lock` publishes the lock that solve produced.
+
+#### The second axis, and what is deliberately not in it
+
+| axis | state |
+|---|---|
+| `BLAS_PROVIDER=mkl` | weekly, **experimental**. `linux-64` only — `bootstrap.sh` rejects it on aarch64 at config time. The number to watch is the tarball size: the accidental MKL pull §S1 warns about was ~560 MB, and this asks for it deliberately. |
+| `HDF5_PARALLEL=yes` | weekly, **experimental**. A supported knob nobody has run; the `mpi_*` variant pulls MPI into the closure of everything touching HDF5 (A3). |
+| builder distro | weekly, **experimental**. Builds `linux-64` on `ubuntu:24.04` instead of `almalinux:9`. The builder's own glibc *should* be irrelevant — conda supplies the toolchain, the sysroot pins the floor — and A14 is the precedent for not assuming it. |
+| `MPI_FAMILY=openmpi` | **not wired.** It needs a `conda/env/*-openmpi.yml`, an `MPI_VERSION` that means something for OpenMPI (`5.0.1` is MPICH's), `prune.list` entries for OpenMPI's plugin packages, and a transport pinned in the smoke harness so it does not probe and warn in a container. A matrix entry added before those exist buys a permanently red job, which is worse than an absent one. |
+| `GLIBC_FLOOR=2.17` | **not wired.** Verifying it needs a glibc-2.17 image to run the tarball on, and there isn't a maintained one: `centos:7` is EOL with dead mirrors. Building *against* a 2.17 sysroot is testable without one, but a floor nothing verifies is a claim, and this repo's whole premise is not making those. |
+
+Neither exclusion is a technical obstacle — both are a missing prerequisite, named,
+so that adding the axis means satisfying it rather than rediscovering it.
+
+#### What the first run measured
+
+Worth keeping, because it decides where the next optimisation goes and it is not
+where anyone would guess. On a 4-vCPU runner, conda-only:
+
+| | linux-64 | linux-aarch64 |
+|---|---|---|
+| build job, end to end | 21 min | 4.5 min |
+| of which `isa-scan` | **18 min** (873 objects) | — |
+| env | solved fresh, 86 pkgs pre-slim | from the lock, 58 pkgs |
+| verify jobs | ~60 s each | ~35 s each |
+
+**The ISA scan is 85% of the x86 build**, and that is before the source builds add
+their objects. It disassembles every ELF with `objdump`, which is inherently serial
+per object and parallel only across them, so it scales with `--jobs` and the runner
+has four. Two things follow: the gap between the platforms above is mostly package
+count and lock-vs-solve (A33), not architecture; and if build time becomes a problem,
+the scan is the thing to attack — not the matrix width, where the temptation will be.
+
+#### What CI cannot tell us
+
+Worth stating so a green matrix is not read as more than it is. The runners are
+4-vCPU single machines, so `SMOKE_RANKS=4` on one node is the ceiling — multi-node MPI
+was already out of scope (§Locked decisions), and CI does not change that. Nothing
+here runs on old hardware; `relocate/isa-scan.py` is the stand-in for the customer's
+2015 Xeon and it is a static check, not a run. And CI verifies distros, not CPUs:
+five base images on two architectures says nothing about the ISA floor that the ISA
+gate does not already say by itself.
 
 ## Verification
 
@@ -985,6 +1056,43 @@ Carrying those checks across *and looking at what they said* is what surfaced
 it. It is also the argument for the smoke test ending at `introduction_ex4`
 rather than at something that only proves the libraries link.
 
+**A32 — the relocatable make fragments cannot handle a space in the install
+path, and nothing can make them.** `distcheck` now unpacks under `.../a b/c`,
+and the first run found this. GNU make's path functions are *list* functions:
+with the tree under a path containing a space, `$(realpath …)` returns the
+correct string while `$(dir …)` and `$(abspath …)` split it and return nonsense.
+Measured directly:
+
+```
+realpath=[/tmp/sp test/a b/c/Makefile]
+__p=[/tmp /tmp/sp test/a b/c/test /tmp/sp test/a b/c/b]
+```
+
+No makefile can work around that — make cannot represent a filename containing a
+space. So the **binaries are fine** (all 342 objects resolve from such a path
+and everything runs), `.pc` files and `libmesh-config` are fine, and only the
+make-based build integration is affected. `validate.sh` reports it as a warning
+naming the cause rather than failing a gate over something unfixable.
+
+Worth stating the trade honestly: the *original* hardcoded `LIBMESH_DIR` would
+have handled a space fine, being a literal. Making it relocatable (A31) is what
+introduced the constraint. That is the right way round — relocation is the
+point — but it is a trade, and it is now documented rather than found later by
+someone with a space in their install path.
+
+**A33 — the extension point had never been extended.** S6's mechanisms all
+existed; its *verification* step — "add a throwaway package in `site/` and
+confirm it builds, gets patchelf'd, and survives `distcheck`" — did not.
+`examples/site-package/` is now a real package, tracked (it cannot live in
+`site/`, which is gitignored), and a clean `make all` with it copied into
+`site/` proves the claim end to end.
+
+It also produced a finding: the harness first ran *everything* executable under
+`libexec/`, and immediately tried to execute rdma-core's
+`truescale-serdes.cmds`. `libexec/` is shared with conda, so the extension point
+gets its own namespace, `libexec/stack-tests/`. No directory in this prefix
+belongs to us alone.
+
 **A31 — source packages bring build-integration metadata, and it bakes the
 prefix in formats the text fixup did not cover.** A conda-only tree had none of
 these. The three source packages install **115** text files naming the build
@@ -1111,9 +1219,91 @@ is supposed to embody: the build log now prints exactly what each base image
 lacked, which is the number worth knowing, and `--allowerasing` — which would
 have "fixed" it by installing *more* than needed — is not used.
 
+### Observed while landing CI
+
+**A36 — a lint gate finds things, which is the point, and two of them were real.**
+`checks.yml` runs `shellcheck --severity=warning` over every tracked script, and it
+was not green on arrival. `relocate/validate.sh`'s `soft()` helper passed `"$@ …"` —
+mixing an array expansion with a string, so with more than one argument the
+`[advisory: pre-slim]` suffix attaches to the last argument rather than to the
+message (SC2145). Every current call site passes a single string, so it has never
+misbehaved; it was a trap laid for the next caller. The second real one arrived with
+the source builds: `fixup-text.sh` feeds `find … | xargs grep -l` over
+`$STACK/include`, which breaks on any header whose path contains whitespace
+(SC2038) — `-print0`/`-0` now. Two were not defects: `fixup-text.sh` matched four
+shebang patterns where one suffices (`'#!'*sh` already covers `'#! '*bash`), which
+read as covering cases it did not, and `wrappers/selftest.sh` and
+`lib/build_common.sh` each needed a directive where the code was already deliberate.
+The severity threshold is `warning` on purpose — the style tier is mostly advice
+about idioms this repo has chosen, and a gate that fires on things you intend to
+keep is a gate you learn to ignore.
+
+**A37 — `linux-64` has no checked-in lock, so its reproducibility is a claim about
+conda-forge rather than about this repository.** `conda/lock/` contains exactly one
+file, for `linux-aarch64`, because that is the platform the pipeline was developed on.
+`bootstrap.sh` falls back to solving from the spec when no lock exists — which is the
+right behaviour, and it means `ci.yml`'s x86 build re-solves on every run and will
+change underneath us at some point without anything saying so.
+
+The first CI run made the gap concrete and larger than "reproducibility": the two
+platforms did not build the same package set. `linux-aarch64` created its env from
+the lock and validated **58 packages**; `linux-64` solved fresh and reached the
+pre-slim gate with **86**. Whatever else that is, it is not the same artifact with a
+different `-march`. `extended.yml`'s `refresh_lock` publishes the lock a fresh solve
+produced, for both platforms, so closing this is a matter of downloading that
+artifact and committing it — from a solve someone has watched `make all` succeed
+against, rather than lifted off a runner unverified.
+
+It also produced a small lesson about reporting. The build job's summary line
+originally printed the *input* — "env from the checked-in lock" — on the very run
+that had solved from scratch, because no `linux-64` lock exists for it to have used.
+It now tests for the lock file and reports what actually happened. A status line
+that reports the request rather than the outcome is worse than no status line.
+
+**A38 — `opensuse/leap:15` has no `gzip`, and that is the verify matrix earning its
+keep.** The first CI run was green on eight of ten verify jobs and red on
+`opensuse/leap:15` — on *both* architectures, identically:
+
+```
+=== verify on openSUSE Leap 15.6, glibc 2.38
+unpacking libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.tar.gz …
+tar (child): gzip: Cannot exec: No such file or directory
+```
+
+`Dockerfile.verify` installed `tar` and nothing else, on the reasoning that
+unpacking a tarball is all that image has to do. But GNU `tar` does not decompress:
+`-z` execs `gzip`, and every other base image in `bases.env` happens to ship it. The
+artifact was never implicated — it was never unpacked.
+
+Both Dockerfiles now name `gzip`, because both need it: the builder untars `.tar.gz`
+sources for PETSc, Trilinos and libMesh and *writes* a `.tar.gz` in `make dist`, so
+`BASE_IMAGE=opensuse/leap:15` would have failed on the first source download for the
+same reason. That is the more useful form of the finding: the package list in these
+files is the honest answer to "what does a machine need to build, unpack and run
+this?", and it was one entry short. A single-distro check could not have found it,
+and `fail-fast: false` is what kept "which distro?" legible rather than cancelling
+the run at the first red job.
+
+**A39 — `strip` takes SIGBUS on at least one object, and the failure is swallowed.**
+Visible in the first CI run's `linux-64` log, mid-`slim`:
+
+```
+relocate/slim.sh: line 135: 85226 Bus error (core dumped)
+  "${STRIP}" --strip-unneeded "$f" 2> /dev/null
+```
+
+The loop continues, 532 objects strip successfully, and nothing downstream notices —
+so the build is green and one object is silently unstripped. This is the same family
+as A16, where `patchelf` died on the three files it had itself mapped, and the fix
+there was to patch a copy and `rename(2)` it in. Not fixed here: which object, and
+whether it is the same hardlink-from-the-package-cache mechanism, wants
+investigating rather than guessing, and the honest interim position is that the
+build tolerates a crashing `strip` without saying so. `slim.sh` should at minimum
+count and report them.
+
 ---
 
-## Instruction-set portability (added after the review)
+## A21 — instruction-set portability (added after the review)
 
 A concern the original plan does not address at all: the stack is built on
 whatever CPU the build host happens to have, and ships to customers whose

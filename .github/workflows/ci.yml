@@ -1,0 +1,44 @@
+# The default configuration, on both target platforms, on every pull request.
+#
+# This is the one that has to stay green: openblas + mpich + serial HDF5, built
+# on almalinux:9, verified on all five base images.  It is exactly the
+# configuration verified by hand in #4 and #5, so a red job here means
+# something changed rather than something was never true.
+#
+# linux-64 and linux-aarch64 both run, both natively.  aarch64 is a shipping
+# target, not a nice-to-have, and it is the platform where the interesting
+# findings have come from so far -- the armv8.1-a floor was measured there.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Superseded pushes to a PR branch are cancelled; main is not, because the
+  # tarball published from a main build is the one people go looking for.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  stack:
+    strategy:
+      fail-fast: false
+      matrix:
+        target_platform: [linux-64, linux-aarch64]
+    name: ${{ matrix.target_platform }}
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: ${{ matrix.target_platform }}
+      # almalinux:9 because that is what the end-to-end runs in #4 used.  The
+      # builder's own glibc barely matters -- conda supplies the compilers and
+      # the sysroot pins GLIBC_FLOOR -- but "what we verified" beats "what we
+      # reason should be equivalent".  Varying it is nightly's job.
+      base_image: almalinux:9
