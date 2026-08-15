@@ -52,6 +52,12 @@ on:
         description: MPI ranks the smoke test asserts.  Runners have 4 vCPU.
         type: string
         default: '4'
+      build_timeout_minutes:
+        description: >
+          Wall-clock budget for 'make all' itself.  This is the real ceiling;
+          the job's own timeout is derived from it and is only a backstop.
+        type: number
+        default: 150
       free_runner_space:
         description: >
           Move Docker's data root onto the runner's large ephemeral disk before
@@ -122,10 +128,22 @@ jobs:
     runs-on: ${{ inputs.target_platform == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     # A clean build with PETSc, Trilinos and libMesh measured ~12 min on 12
     # cores; runners have 4, and conda, the ISA scan and distcheck sit on top of
-    # that.  The ceiling is deliberately well clear of the estimate rather than
-    # close to it: a timeout kills the job before the diagnostics step, so the
-    # one run that most needs its logs is the one that loses them.
-    timeout-minutes: 180
+    # that.
+    #
+    # The budget is enforced per-STEP, with 'timeout', rather than here.  A job
+    # timeout cancels the job, and a cancelled job does not run its remaining
+    # steps -- not even 'if: always()' ones -- so the run that most needs its
+    # logs is exactly the run that loses them.  Bounding the long steps instead
+    # lets them fail red and hands control back to Collect diagnostics,
+    # Summary and Publish diagnostics.
+    #
+    # So what is left here is a backstop that should never fire.  It would be
+    # nicer to derive it -- two hand-maintained numbers that must stay apart do
+    # not stay apart -- but GitHub's expression syntax has no arithmetic, so
+    # instead it is set LOOSELY, far above any legitimate step budget, and the
+    # relationship is asserted at runtime in Runner facts below.  A backstop
+    # does not need to be tight; it needs to be beyond every real case.
+    timeout-minutes: 300
     continue-on-error: ${{ inputs.experimental }}
     env:
       # docker/compose.yaml reads all of these.  Anything compose does not
@@ -153,6 +171,8 @@ jobs:
       # needs 60 GB locally, and a runner that has run short of disk fails in
       # ways that read like a build bug.
       - name: Runner facts
+        env:
+          BUILD_TIMEOUT: ${{ inputs.build_timeout_minutes }}
         run: |
           uname -srm
           echo "cpus: $(nproc)"
@@ -161,6 +181,17 @@ jobs:
           docker version --format 'docker {{.Server.Version}}'
           docker info --format 'docker data root {{.DockerRootDir}}'
           docker compose version
+
+          # The job's timeout-minutes is a literal 300 because GitHub
+          # expressions cannot do arithmetic.  This is the assertion that keeps
+          # that literal honest: the step budget plus the conda step's 45 and a
+          # 30-minute tail for diagnostics and upload has to stay under it, or
+          # the job cancellation this whole design exists to avoid comes back.
+          echo "make all budget: ${BUILD_TIMEOUT}m, job backstop: 300m"
+          if [ "$(( BUILD_TIMEOUT + 45 + 30 ))" -ge 300 ]; then
+            echo "::error::build_timeout_minutes=${BUILD_TIMEOUT} leaves no room under the 300m job backstop"
+            exit 1
+          fi
 
       - name: Build the builder image (${{ inputs.base_image }})
         working-directory: docker
@@ -175,10 +206,16 @@ jobs:
 
       # Split out of 'make all' only when a lock refresh was asked for: the lock
       # has to be taken while the env is still the build environment.
+      # --signal=INT, not the default TERM.  'docker compose run' treats SIGINT
+      # as "stop this container", so the container is torn down and the named
+      # volumes released; on TERM the CLI can exit while the container keeps
+      # running, and the next step inherits a busy build root.  --kill-after is
+      # the backstop for a compose that ignores the INT too.
       - name: conda + refresh the lock
         if: inputs.refresh_lock
         working-directory: docker
         run: >
+          timeout --verbose --signal=INT --kill-after=2m 45m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
@@ -187,6 +224,7 @@ jobs:
       - name: make all
         working-directory: docker
         run: >
+          timeout --verbose --signal=INT --kill-after=2m ${{ inputs.build_timeout_minutes }}m
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
