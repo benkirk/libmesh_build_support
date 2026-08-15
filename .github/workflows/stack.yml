@@ -52,6 +52,14 @@ on:
         description: MPI ranks the smoke test asserts.  Runners have 4 vCPU.
         type: string
         default: '4'
+      free_runner_space:
+        description: >
+          Move Docker's data root onto the runner's large ephemeral disk before
+          building.  On by default because this build's working set lives in
+          named volumes, which live under that data root.  An escape hatch, not
+          a knob: turn it off to compare against a stock runner.
+        type: boolean
+        default: true
       ignore_lock:
         description: >
           Solve from the spec even where a checked-in lock exists.  The lock is
@@ -135,6 +143,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Before anything touches Docker, because it restarts the daemon.
+      - name: Free disk space
+        if: inputs.free_runner_space
+        uses: ./.github/actions/free-disk
+
       # Worth a line in every log: the build root, the conda package cache and
       # the PETSc/Trilinos build trees together are the reason Docker Desktop
       # needs 60 GB locally, and a runner that has run short of disk fails in
@@ -144,8 +157,9 @@ jobs:
           uname -srm
           echo "cpus: $(nproc)"
           free -h | head -2
-          df -h / | tail -1
+          df -h / /mnt 2>/dev/null || df -h /
           docker version --format 'docker {{.Server.Version}}'
+          docker info --format 'docker data root {{.DockerRootDir}}'
           docker compose version
 
       - name: Build the builder image (${{ inputs.base_image }})

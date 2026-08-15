@@ -1,0 +1,37 @@
+# Adapted from benkirk/demo_github_actions' 'slim-action-runner', which is in
+# turn InstructLab's 'Free Disk Space'.  What changed and why is documented at
+# the top of free-disk.sh, next to the code that embodies it.
+#
+# The logic lives in free-disk.sh rather than inline here so that .github/
+# workflows/checks.yml gates it: 'bash -n' and shellcheck run over
+# git ls-files '*.sh', and a composite action's inline 'run:' block is invisible
+# to both.
+name: Free disk space
+description: >
+  Move Docker's data root onto the runner's large ephemeral disk, so that named
+  volumes -- BUILD_ROOT, the conda package cache, the source cache -- are not
+  competing for the root filesystem.  Optionally also remove runner software
+  this build never uses.
+
+inputs:
+  docker-root:
+    description: Where Docker's data root should end up.
+    required: false
+    default: /mnt/docker
+  aggressive:
+    description: >
+      Also delete the runner's preinstalled JVMs, .NET, Android SDK and friends.
+      Off by default; turn it on only once a run shows relocating the data root
+      was not enough.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      env:
+        DOCKER_ROOT: ${{ inputs.docker-root }}
+        AGGRESSIVE: ${{ inputs.aggressive }}
+      run: bash "${GITHUB_ACTION_PATH}/free-disk.sh"
