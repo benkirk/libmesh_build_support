@@ -234,7 +234,9 @@ done < <(
 if [ -n "${BUILD_ROOT:-}" ] && [ "${BUILD_ROOT}" != "${STACK}" ]; then
   while IFS= read -r f; do
     LC_ALL=C grep -qI . "$f" 2>/dev/null || continue
-    sed -i -E "s|${BUILD_ROOT}/\.(work|conda)[^\"'[:space:]]*|${NEUTRAL}|g" "$f"
+    # '#' as the delimiter, not '|': the alternation below contains a '|', and
+    # with '|' as the delimiter sed reads it as the end of the pattern.
+    sed -i -E "s#${BUILD_ROOT}/\.(work|conda)[^\"'[:space:]]*#${NEUTRAL}#g" "$f"
     prov_fixed=$((prov_fixed + 1))
   done < <(LC_ALL=C grep -rlE "${BUILD_ROOT}/\.(work|conda)" "${STACK}" 2>/dev/null || true)
 fi
