@@ -34,6 +34,10 @@ ninja
 pkg-config
 patchelf
 git
+# PETSc's configure needs diff and libMesh's bundled netcdf needs m4;
+# nothing in the artifact needs either.
+diffutils
+m4
 # git's own runtime deps that nothing else in the stack wants
 libgit2
 # perl arrives only as a git dependency.  It is also the one package whose
