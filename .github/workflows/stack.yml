@@ -626,6 +626,7 @@ jobs:
         continue-on-error: true
         env:
           CONFIG: ${{ needs.build.outputs.config }}
+          ARTIFACT: ${{ needs.build.outputs.artifact }}
           OUTCOME: ${{ steps.run.outcome }}
           EXPERIMENTAL: ${{ inputs.experimental }}
         run: |
@@ -643,6 +644,12 @@ jobs:
           safe="$(slug "${VERIFY_IMAGE}")"
           echo "SAFE_BASE=${safe}" >> "$GITHUB_ENV"
 
+          # The FILE name has to be unique across the whole run, not just the
+          # artifact name: 'summarise' downloads with merge-multiple, which
+          # flattens every artifact into one directory.  Both platforms verify
+          # on the same five base images, so 'verify-almalinux-9.json' collided
+          # with itself and ten sidecars rendered as five rows -- half the
+          # matrix silently missing from the table meant to show all of it.
           mkdir -p result
           jq -n \
             --arg     config       "${CONFIG}" \
@@ -656,8 +663,8 @@ jobs:
               experimental: $experimental, seconds: $seconds,
               distro: (if $distro == "" then null else $distro end),
               glibc:  (if $glibc  == "" then null else $glibc  end)}' \
-            > "result/verify-${safe}.json"
-          cat "result/verify-${safe}.json"
+            > "result/verify-${ARTIFACT}-${safe}.json"
+          cat "result/verify-${ARTIFACT}-${safe}.json"
 
       - name: Publish result sidecar
         if: always()
