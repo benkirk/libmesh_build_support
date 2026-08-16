@@ -45,9 +45,35 @@ import sys
 # --- x86-64 microarchitecture levels -----------------------------------------
 # v1 baseline: SSE, SSE2.  v2 adds SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT.
 # v3 adds AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.  v4 adds AVX-512.
+#
+# These alternations are PREFIX-FACTORED.  Python's re does not factor a shared
+# prefix across '|' branches -- given 'vpternlog|vpcompress|...' it re-tries the
+# 'v', then the 'p', at every position for every branch -- so the searches were
+# 84% of the linux-64 scan (454 s of 538).  Hoisting the shared prefix into a
+# single group lets the engine fail the whole family on one character.  Measured
+# 7.15x on X86_V3 over 66 MB of real instruction text; ~4.6x realised over the
+# whole scan.
+#
+# Factoring a match gate is only safe if it preserves the accepted language
+# EXACTLY: a pattern that accepts one mnemonic more is a worse gate, not a
+# faster one.  So every group below is argued to be equivalent to the flat
+# alternation it replaces, branch by branch, and the equivalence is checked two
+# ways that no corpus can fake -- relocate/isa-bench.py --verify-factoring
+# (every one-character mutation, nine contexts) and --compare-patterns (span for
+# span over a built stack).  The near-miss each factoring must NOT open has a
+# negative in SELF_TEST_NEGATIVE.
+#
+# X86_V4: %zmm and the {%kN} mask-operand marker stand alone (no shared prefix).
+# The rest are all '\bv' instructions; four continue 'vp' (vpternlog, vpcompress,
+# vpexpand, vpconflict) and factor once more.  '\bv(p(ternlog|compress|expand|
+# conflict)|gatherpf|scatter|rangep|reducep|fpclass)' spells exactly those nine
+# mnemonics and nothing shorter -- e.g. 'vp' with no listed continuation is not a
+# branch, so bare 'vp'/'vpx' stay non-matches.  No trailing \b, as before, so the
+# suffixed real forms (vpternlogd, vrangeps, ...) still match.
 X86_V4 = re.compile(
-    r"%zmm|\{%k[0-7]\}|\bvpternlog|\bvpcompress|\bvpexpand|\bvpconflict|"
-    r"\bvgatherpf|\bvscatter|\bvrangep|\bvreducep|\bvfpclass")
+    r"%zmm|\{%k[0-7]\}|"
+    r"\bv(?:p(?:ternlog|compress|expand|conflict)|"
+    r"gatherpf|scatter|rangep|reducep|fpclass)")
 # NOTE: 'tzcnt' is deliberately absent, and it is the interesting case.  It
 # encodes as F3 0F BC, which a pre-BMI CPU decodes as 'rep bsf' -- the REP
 # prefix is ignored and it executes correctly as plain BSF.  The two differ only
@@ -62,13 +88,35 @@ X86_V4 = re.compile(
 # undefined at zero.  gcc only emits it with -mlzcnt/-mabm, so its presence is
 # a real signal.  Silent wrong answers deserve a failure at least as much as a
 # crash does.
+# X86_V3, 21 flat branches -> three groups by anchor shape:
+#   %ymm                                       stands alone.
+#   the '\bv' FMA/permute mnemonics, no trailing \b (they carry operand-size
+#     suffixes: vfmadd213sd, vpbroadcastd):
+#       vfmadd|vfmsub|vfnmadd|vfnmsub  ==  vf(m|nm)(add|sub)  -- the four cross
+#         products of {m,nm}x{add,sub}, and only those four;
+#       vperm2i128|vpbroadcast          ==  vp(erm2i128|broadcast).
+#   the BMI/misc mnemonics, each \b-anchored on BOTH sides -- '\ba\b|\bb\b' is
+#     exactly '\b(a|b)\b', so they share one wrapper.  Inside, grouped by first
+#     letter: b(zhi|ls(i|r|msk)), m(ulx|ovbe), p(dep|ext), s(arx|h(lx|rx)), and
+#     andn/lzcnt/rorx alone.  Note 'ls(i|r|msk)' lists the three suffixes i, r,
+#     msk -- it is NOT 'bls[imr]', which would also accept 'blsm' (see
+#     SELF_TEST_NEGATIVE); the only 'm' here is the first letter of 'msk'.
 X86_V3 = re.compile(
-    r"%ymm|\bvfmadd|\bvfmsub|\bvfnmadd|\bvfnmsub|\bvperm2i128|\bvpbroadcast|"
-    r"\bbzhi\b|\bpdep\b|\bpext\b|\bmulx\b|\brorx\b|\bsarx\b|\bshlx\b|\bshrx\b|"
-    r"\bandn\b|\bblsi\b|\bblsr\b|\bblsmsk\b|\blzcnt\b|\bmovbe\b")
+    r"%ymm|"
+    r"\bv(?:f(?:m|nm)(?:add|sub)|p(?:erm2i128|broadcast))|"
+    r"\b(?:andn|b(?:zhi|ls(?:i|r|msk))|lzcnt|m(?:ulx|ovbe)|"
+    r"p(?:dep|ext)|rorx|s(?:arx|h(?:lx|rx)))\b")
+# X86_V2: six of the nine branches start '\bp', but with MIXED trailing anchors
+# -- popcnt/pcmpgtq/ptest end in \b, while pblend/pmovzx/pmovsx do not (they take
+# suffixes: pblendw, pmovzxbw).  Factoring the shared '\bp' keeps each branch's
+# own trailing anchor inside the group: p(opcnt\b|cmpgtq\b|blend|test\b|mov[sz]x),
+# where 'mov[sz]x' is exactly pmovzx|pmovsx.  round[ps][sd] is unchanged;
+# crc32|cmpxchg16b share only 'c' and factor to c(rc32|mpxchg16b), both \b-tailed
+# -- so 'crc32\b' still declines the memory-operand forms crc32b/crc32q exactly
+# as before (a pre-existing, deliberately preserved false negative).
 X86_V2 = re.compile(
-    r"\bpopcnt\b|\bpcmpgtq\b|\bpblend|\bptest\b|\bround[ps][sd]\b|"
-    r"\bpmovzx|\bpmovsx|\bcrc32\b|\bcmpxchg16b\b")
+    r"\bp(?:opcnt\b|cmpgtq\b|blend|test\b|mov[sz]x)|"
+    r"\bround[ps][sd]\b|\bc(?:rc32|mpxchg16b)\b")
 
 # --- aarch64 --------------------------------------------------------------
 # armv8-a is the baseline and is universal.  SVE/SVE2 and SME are the real
