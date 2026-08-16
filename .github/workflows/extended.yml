@@ -28,6 +28,14 @@ on:
 
 permissions:
   contents: read
+  # Not because anything here publishes -- publish_images defaults to false and
+  # no job below sets it.  A called reusable workflow may not request MORE than
+  # its caller grants, and stack.yml declares 'packages: write' for the image
+  # push it does under ci.yml.  Granting only 'contents: read' here made every
+  # call fail validation before a single job started, which is why this file
+  # had never produced a run: the schedule would have died the same way, silently,
+  # on a Monday morning.  ci.yml grants the same pair for the same reason.
+  packages: write
 
 concurrency:
   group: extended
