@@ -42,6 +42,15 @@ on:
       hdf5_parallel:
         type: string
         default: 'no'
+      libmesh_source:
+        description: >
+          Where libMesh's sources come from -- 'tarball' (the release asset, the
+          default and what the whole matrix builds) or 'git' (clone the ref,
+          init the contrib submodules, ./bootstrap).  The git path needs git
+          from the builder image and autoconf/automake/libtool from conda, so it
+          is also the job that proves both halves of that split are provisioned.
+        type: string
+        default: tarball
       glibc_floor:
         type: string
         default: '2.28'
@@ -193,6 +202,7 @@ jobs:
       GLIBC_FLOOR: ${{ inputs.glibc_floor }}
       GCC_VERSION: ${{ inputs.gcc_version }}
       HDF5_PARALLEL: ${{ inputs.hdf5_parallel }}
+      LIBMESH_SOURCE: ${{ inputs.libmesh_source }}
       BUILDKIT_PROGRESS: plain
     outputs:
       artifact: ${{ steps.names.outputs.artifact }}
@@ -261,8 +271,12 @@ jobs:
         id: names
         run: |
           slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'; }
-          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}-$(slug "${BASE_IMAGE}")"
-          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · on ${BASE_IMAGE}"
+          # Only the non-default source mode is in the name, so every existing
+          # artifact keeps the name it has today.
+          src=""
+          if [ "${LIBMESH_SOURCE}" != tarball ]; then src="-libmesh${LIBMESH_SOURCE}"; fi
+          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}${src}-$(slug "${BASE_IMAGE}")"
+          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · libmesh:${LIBMESH_SOURCE} · on ${BASE_IMAGE}"
           {
             echo "ARTIFACT=${artifact}"
             echo "CONFIG=${config}"
@@ -283,6 +297,7 @@ jobs:
         run: >
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
+          -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
           build make print-config
 
       # 'make all' is run in three invocations rather than one.  The stage graph
@@ -359,6 +374,7 @@ jobs:
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
           build make build
 
       # The one that earns its keep: toolchain plus built stack, before
@@ -417,6 +433,7 @@ jobs:
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
+          -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
           -e SMOKE_RANKS='${{ inputs.smoke_ranks }}'
           build make all
 

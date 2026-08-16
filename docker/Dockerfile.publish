@@ -8,9 +8,9 @@
 # layout looks the way it does.
 #
 # FROM the builder image rather than the bare base, so the OS prerequisites
-# Dockerfile.builder works out and installs -- curl, tar, gzip, bzip2, make,
-# findutils, which, ps, ca-certificates -- are already present and this image
-# can actually continue a build rather than merely hold the results of one.
+# Dockerfile.builder works out and installs -- curl, git, tar, gzip, bzip2, xz,
+# make, findutils, which, ps, ca-certificates -- are already present and this
+# image can actually continue a build rather than merely hold the results of one.
 ARG BUILDER_IMAGE=libmesh-stack-builder:local
 FROM ${BUILDER_IMAGE}
 

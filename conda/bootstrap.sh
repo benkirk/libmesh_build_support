@@ -149,7 +149,19 @@ else
     #  - m4: libMesh's bundled netcdf configure stops with "Cannot find m4
     #    utility".  Same category as diffutils -- a build tool the conda env
     #    owns, not a host prerequisite.
+    #
+    #    The line between this list and Dockerfile.builder is FETCHING versus
+    #    BUILDING, not "small" versus "large".  curl and git are transports and
+    #    live on the host; anything that compiles or generates lives here, where
+    #    one conda-forge pin gives the same version on every base image.
+    #
+    #  - autoconf/automake/libtool: PKG_SOURCE=git recipes run ./bootstrap
+    #    (autoreconf) against a checkout, which the release tarball has already
+    #    had done for it.  Squarely a generator, and version-sensitive -- which
+    #    is exactly why it is pinned here rather than taken from whatever the
+    #    base image ships.  Pruned before packing like the rest.
     "cmake<4" "python<3.13" ninja make pkg-config diffutils m4
+    autoconf automake libtool
     #  - patchelf is deliberately NOT pinned >= 0.18, despite that being the
     #    version that fixes program-header-growth corruption: conda-forge
     #    marked every 0.18.0 build 'broken' on main across all Linux subdirs,
@@ -181,9 +193,10 @@ else
     *) echo "HDF5_PARALLEL must be yes or no, got: ${HDF5_PARALLEL}" >&2; exit 1 ;;
   esac
 
-  # git: several PETSc --download-* packages fetch from git rather than a
-  # tarball.  Pruned before packing like the rest of the build tools.
-  specs+=( zlib git )
+  # git is deliberately NOT here: it is a fetcher, so docker/Dockerfile.builder
+  # provides it alongside curl and tar.  PETSc's --download-* packages and
+  # PKG_SOURCE=git recipes both find it on PATH either way.
+  specs+=( zlib )
 
   "${CONDA}" create -y -p "${STACK}" "${specs[@]}"
 fi

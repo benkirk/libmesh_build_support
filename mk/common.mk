@@ -102,6 +102,11 @@ PKG_ENV = \
 # declare_pkg -- called at the end of each pkgs/<name>/pkg.mk.  Snapshots the
 # generic PKG_* variables into namespaced ones so many pkg.mk files can be
 # included without clobbering each other, then clears them for the next include.
+#
+# Note what the clearing implies for a recipe author: after the first pkg.mk is
+# included these names are DEFINED-but-empty, so '?=' in a later pkg.mk silently
+# does nothing.  Recipes assign with ':=' and let the defaults below apply --
+# which is why PKG_SOURCE defaults via $(or ...) here rather than via '?='.
 define declare_pkg
 PKGS                    += $(PKG_NAME)
 PKG_VERSION_$(PKG_NAME) := $(PKG_VERSION)
@@ -109,11 +114,17 @@ PKG_DEPS_$(PKG_NAME)    := $(PKG_DEPS)
 PKG_URL_$(PKG_NAME)     := $(PKG_URL)
 PKG_DIR_$(PKG_NAME)     := $(pkg_dir)
 PKG_STAGE_$(PKG_NAME)   := $(or $(PKG_STAGE),build)
+PKG_SOURCE_$(PKG_NAME)  := $(or $(PKG_SOURCE),tarball)
+PKG_GIT_URL_$(PKG_NAME) := $(PKG_GIT_URL)
+PKG_GIT_REF_$(PKG_NAME) := $(PKG_GIT_REF)
 PKG_NAME    :=
 PKG_VERSION :=
 PKG_DEPS    :=
 PKG_URL     :=
 PKG_STAGE   :=
+PKG_SOURCE  :=
+PKG_GIT_URL :=
+PKG_GIT_REF :=
 endef
 
 #-------------------------------------------------------------------------------

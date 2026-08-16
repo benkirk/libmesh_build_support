@@ -5,7 +5,9 @@
 #
 # Provided by mk/pkg.mk: STACK WORK SRC_CACHE CONDA_HOME NPROC MAKE_J_L
 #                        TARGET_PLATFORM BLAS_PROVIDER MPI_FAMILY RPATH_MODE
-#                        TOPDIR PKG_NAME PKG_VERSION PKG_URL PKG_DIR
+#                        ISA_BASELINE USE_WRAPPERS TOPDIR
+#                        PKG_NAME PKG_VERSION PKG_URL PKG_DIR
+#                        PKG_SOURCE PKG_GIT_URL PKG_GIT_REF
 
 set -euo pipefail
 
@@ -13,6 +15,9 @@ set -euo pipefail
 
 SRC_CACHE="${SRC_CACHE:-${WORK}/src}"
 BUILD_TMP="${WORK}/build/${PKG_NAME}-${PKG_VERSION}"
+# mk/pkg.mk exports this for every package, but a recipe run by hand may not
+# have it, and 'set -u' is on.
+PKG_SOURCE="${PKG_SOURCE:-tarball}"
 NPROC="${NPROC:-4}"
 # Prefer MAKE_J_L over a bare -j: it carries the -l load cap, which is what
 # keeps a shared build host usable.
@@ -89,6 +94,56 @@ download_src () {
   fi
   log "unpacking $(basename "${f}")"
   tar -xf "${f}" -C "${BUILD_TMP}"
+}
+
+# fetch_git URL REF [DESTDIR] -- cached bare mirror, detached checkout in DESTDIR.
+#
+# A bare MIRROR rather than a shallow clone, and that is not thrift: --depth 1
+# cannot check out an arbitrary SHA, and cannot serve a different ref later from
+# the same cache.  The mirror is fetched once and every subsequent ref -- tag,
+# branch or commit -- is a local operation.
+#
+# git comes from docker/Dockerfile.builder, not the conda env; see the note
+# there about fetchers versus build tools.
+fetch_git () {
+  local url="$1" ref="$2" dest="${3:-${BUILD_TMP}/${PKG_NAME}-${PKG_VERSION}}" m
+  [ -n "${url}" ] || { echo "fetch_git: no URL (is PKG_GIT_URL set?)" >&2; exit 1; }
+  [ -n "${ref}" ] || { echo "fetch_git: no ref (is PKG_GIT_REF set?)" >&2; exit 1; }
+
+  m="${SRC_CACHE}/$(basename "${url}" .git).git"
+  if [ ! -d "${m}" ]; then
+    log "mirroring ${url}"
+    rm -rf "${m}.part"
+    git clone --quiet --mirror "${url}" "${m}.part"
+    mv "${m}.part" "${m}"                 # atomic, as download_src does
+  else
+    # Non-fatal on purpose: an existing mirror plus no network is a valid state,
+    # and 'set -e' would otherwise turn an offline rebuild into a build failure.
+    log "refreshing mirror $(basename "${m}")"
+    git -C "${m}" remote update --prune \
+      || log "warning: mirror refresh failed; building from cached objects"
+  fi
+
+  rm -rf "${dest}"
+  git clone --quiet --no-checkout "${m}" "${dest}"
+  # Point origin back upstream BEFORE touching submodules.  .gitmodules may use
+  # relative URLs, which git resolves against origin -- and origin is currently
+  # a path into SRC_CACHE, where no submodule has ever been mirrored.
+  git -C "${dest}" remote set-url origin "${url}"
+  # --detach gives one code path for a tag, a branch and a raw SHA.
+  git -C "${dest}" checkout --quiet --detach "${ref}"
+  git -C "${dest}" submodule update --init --recursive
+  log "checked out ${ref} at $(git -C "${dest}" rev-parse --short HEAD)"
+}
+
+# fetch_src -- dispatch on PKG_SOURCE.  Both modes leave the sources at the same
+# predictable path, so a recipe resolves 'src' the same way either way.
+fetch_src () {
+  case "${PKG_SOURCE}" in
+    tarball) download_src "${PKG_URL}" "$@" ;;
+    git)     fetch_git "${PKG_GIT_URL}" "${PKG_GIT_REF}" ;;
+    *) echo "unknown PKG_SOURCE: ${PKG_SOURCE} (want tarball or git)" >&2; exit 1 ;;
+  esac
 }
 
 clean_build_tmp () { rm -rf "${BUILD_TMP}"; }

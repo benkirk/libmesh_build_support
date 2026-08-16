@@ -28,6 +28,14 @@ on:
 
 permissions:
   contents: read
+  # Not because anything here publishes -- publish_images defaults to false and
+  # no job below sets it.  A called reusable workflow may not request MORE than
+  # its caller grants, and stack.yml declares 'packages: write' for the image
+  # push it does under ci.yml.  Granting only 'contents: read' here made every
+  # call fail validation before a single job started, which is why this file
+  # had never produced a run: the schedule would have died the same way, silently,
+  # on a Monday morning.  ci.yml grants the same pair for the same reason.
+  packages: write
 
 concurrency:
   group: extended
@@ -82,6 +90,35 @@ jobs:
     with:
       target_platform: linux-64
       hdf5_parallel: 'yes'
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true
+
+  #-----------------------------------------------------------------------------
+  # libMesh from git rather than from the release tarball.
+  #
+  # Two things are on trial here and only one of them is libMesh.  The other is
+  # the provisioning split: git now comes from docker/Dockerfile.builder and the
+  # autotools from the conda env, and this is the only job that needs BOTH to be
+  # true -- it clones, it initialises the contrib submodules, and it runs
+  # ./bootstrap.  A regression in either half fails here and nowhere else.
+  #
+  # It is also the standing check on A29.  The tarball ships a netcdf_meta.h
+  # saying NC_HAS_HDF5 0, which the recipe repairs; git's own header is already
+  # correct, so a green introduction_ex4 here says the upstream header is right
+  # WITHOUT the repair -- the claim A29 makes and could not previously test.
+  #
+  # Both platforms, because the aarch64 conda lock is what provisions the
+  # autotools there and a stale lock is the failure mode this is watching for.
+  libmesh-git:
+    strategy:
+      fail-fast: false
+      matrix:
+        target_platform: [linux-64, linux-aarch64]
+    name: libmesh from git (${{ matrix.target_platform }})
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: ${{ matrix.target_platform }}
+      libmesh_source: git
       verify_bases: 'almalinux:8 ubuntu:24.04'
       experimental: true
 

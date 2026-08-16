@@ -23,7 +23,9 @@ dependencies:
   - pkg-config
   - patchelf   # see A15: conda-forge has no installable 0.18+
   - python
-  - git
+  - autoconf
+  - automake
+  - libtool
   - mpich=5.0.1
   - libopenblas
   - blas=*=openblas

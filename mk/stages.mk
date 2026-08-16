@@ -219,6 +219,7 @@ print-config:
 	  SLIM_PROFILE '$(SLIM_PROFILE)' SHIP_PYTHON '$(SHIP_PYTHON)' \
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \
+	  'PACKAGES (git)' '$(or $(strip $(foreach p,$(PKGS),$(if $(filter git,$(PKG_SOURCE_$(p))),$(p)@$(PKG_GIT_REF_$(p))))),none)' \
 	  TARBALL '$(TARBALL)'
 
 ## clean: remove build stamps and logs, keep the conda env and caches

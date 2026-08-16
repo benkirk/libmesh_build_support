@@ -18,15 +18,37 @@ PKG_VERSION := 2.1.0
 PKG_URL     := https://example.com/mysolver-2.1.0.tar.gz
 PKG_DEPS    := libmesh          # other package names; conda env is implicit
 PKG_STAGE   := build            # build (default) | optional
+PKG_SOURCE  := tarball          # tarball (default) | git
 
 $(eval $(call declare_pkg))
 ```
 
 `declare_pkg` snapshots these into namespaced variables, so every recipe can use
-the same plain `PKG_*` names without clobbering its neighbours.
+the same plain `PKG_*` names without clobbering its neighbours. Assign with
+`:=`, never `?=` — the snapshot clears each name afterwards, leaving it
+*defined-but-empty*, so a `?=` in any package included after the first silently
+does nothing.
 
 `PKG_DEPS` becomes a stamp prerequisite, so independent packages build
 concurrently under `make -jN`.
+
+`PKG_SOURCE := git` builds from a repository instead of a release archive, and
+then two more variables are required:
+
+```make
+PKG_GIT_URL := https://github.com/example/mysolver.git
+PKG_GIT_REF := v2.1.0           # any tag, branch or SHA
+```
+
+`pkgs/libmesh/` is the worked example — it exposes the choice as
+`LIBMESH_SOURCE`, so `make LIBMESH_SOURCE=git build` switches it without editing
+a tracked file.
+
+**The stamp does not know which mode it was built in.** `mk/pkg.mk`'s rule
+depends on dependency stamps and `build.sh`, not on the version, URL or source
+mode, so `make LIBMESH_SOURCE=git build` over an existing tarball build is a
+silent no-op. Delete the stamp (or `make clean`) when changing *what* is built
+rather than how — the same caveat already applies to a version bump.
 
 `PKG_STAGE` decides whether `make build` pulls the package in. `build`, the
 default, puts it in the default graph. `optional` still gives it its own target
@@ -39,15 +61,43 @@ sets.
 Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
 `TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `ISA_BASELINE`,
 `USE_WRAPPERS`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
-`PKG_DIR`.
+`PKG_DIR` / `PKG_SOURCE` / `PKG_GIT_URL` / `PKG_GIT_REF`.
 
 Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
 which is what keeps a shared build host usable.
 
 Sourcing `lib/build_common.sh` gives you `activate_toolchain`, `list_build_env`,
-`download_src`, `log`, `require`, `clean_build_tmp`, and a `BUILD_TMP` scratch
-directory. Call `list_build_env` right after `activate_toolchain` — when a build
-fails three hours in, the log is all you have.
+`download_src`, `fetch_git`, `fetch_src`, `log`, `require`, `clean_build_tmp`,
+and a `BUILD_TMP` scratch directory. Call `list_build_env` right after
+`activate_toolchain` — when a build fails three hours in, the log is all you
+have.
+
+`fetch_src` dispatches on `PKG_SOURCE`, so one call covers both modes and leaves
+the sources at the same path either way. `fetch_git` caches a **bare mirror** in
+`SRC_CACHE` and checks out the ref detached, with submodules — a mirror rather
+than a shallow clone because `--depth 1` cannot check out an arbitrary SHA or
+serve a different ref later from the same cache.
+
+Where the tools come from is a split worth knowing, because it decides what your
+recipe must `require`:
+
+- **git is in the builder image**, alongside `curl` and `tar`. Fetching sources
+  is the host's job.
+- **autoconf, automake and libtool are in the conda env**, alongside `m4` and
+  `cmake`, and are pruned from the artifact. Anything that compiles or generates
+  belongs to the toolchain, where one pin behaves the same on every base image.
+
+So a git-mode recipe requires them itself and runs its own bootstrap — the
+framework fetches, it does not autoreconf for you:
+
+```sh
+case "${PKG_SOURCE}" in
+  tarball) require curl tar ;;
+  git)     require git autoconf automake libtool ;;
+esac
+fetch_src
+[ "${PKG_SOURCE}" = git ] && ( cd "${src}" && ./bootstrap )
+```
 
 Two rules that matter:
 

@@ -58,7 +58,8 @@ ok   () { echo "  ok    $*"; }
 # Stage-dependent severity.  The two gates ask genuinely different questions.
 #
 # Post-relocate, a third of the tree is about to be deleted: the sysroot, the
-# compilers, git (and its perl), tk (and its X11 dependency), libsystemd.  Their
+# compilers, the autotools (and their perl), tk (and its X11 dependency),
+# libsystemd.  Their
 # unresolved references and their glibc requirements are facts about packages
 # that will not be in the artifact.  Failing on them there would mean failing on
 # files we are about to remove -- which trains you to ignore the gate, and a

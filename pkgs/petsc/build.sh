@@ -21,7 +21,11 @@
 
 activate_toolchain
 list_build_env
-require curl tar make
+# git: several of the --download- packages below are fetched from a repository
+# rather than a tarball.  It comes from the builder image, not the conda env, so
+# assert it here -- a missing git otherwise surfaces deep inside PETSc's
+# configure as something much less obvious.
+require curl tar make git
 
 download_src "${PKG_URL}"
 
