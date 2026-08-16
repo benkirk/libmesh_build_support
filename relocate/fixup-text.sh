@@ -185,6 +185,26 @@ done < <(find "${STACK}/lib" -name '*.cmake' -type f 2>/dev/null)
 la_removed="$(find "${STACK}" -name '*.la' -type f -print -delete 2>/dev/null | wc -l)"
 
 #------------------------------------------------------------------------------
+# site.cfg, from mkl-devel, is the same category and goes the same way.  It is
+# numpy's build configuration for MKL and it records the prefix twice, as
+# absolute paths fixed at install time:
+#
+#     library_dirs = <prefix>/lib
+#     include_dirs = <prefix>/include
+#
+# Unlike a .pc there is no relative form to rewrite it into.  numpy resolves a
+# relative path in site.cfg against the CALLER'S working directory, not against
+# the file, so a rewrite would turn a visibly wrong path into a quietly wrong
+# one -- which is worse, and is why this is a deletion and not a sed.
+#
+# Nothing in the artifact reads it.  It exists to build numpy against MKL, and
+# the tree ships no compiler by design.  Only BLAS_PROVIDER=mkl ever has one,
+# which is why the openblas matrix never saw it: the mkl job is the first build
+# this project has ever run to completion, and validate caught it at the final
+# gate on the first attempt.
+cfg_removed="$(find "${STACK}" -maxdepth 1 -name 'site.cfg' -type f -print -delete 2>/dev/null | wc -l)"
+
+#------------------------------------------------------------------------------
 # HDF5 bakes an absolute plugin directory into its public header, so every
 # consumer that includes H5pubconf.h would inherit OUR build path.  There is no
 # relative form for a #define, so reset it to HDF5's own upstream default rather
@@ -280,7 +300,8 @@ while IFS= read -r f; do
 done < <(LC_ALL=C grep -rla "${STACK}" "${STACK}" 2>/dev/null || true)
 
 echo "fixup: ${pc_fixed} .pc, ${sh_fixed} wrappers, ${mk_fixed} make, ${cm_fixed} cmake," \
-     "${prov_fixed} provenance, ${skipped} already done, ${la_removed} .la removed"
+     "${prov_fixed} provenance, ${skipped} already done," \
+     "${la_removed} .la and ${cfg_removed} site.cfg removed"
 echo "fixup: residue -> ${REPORT}"
 awk '{print $1}' "${REPORT}" | sort | uniq -c | sed 's/^/  /'
 
