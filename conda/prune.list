@@ -33,17 +33,27 @@ cmake
 ninja
 pkg-config
 patchelf
-git
 # PETSc's configure needs diff and libMesh's bundled netcdf needs m4;
 # nothing in the artifact needs either.
 diffutils
 m4
-# git's own runtime deps that nothing else in the stack wants
-libgit2
-# perl arrives only as a git dependency.  It is also the one package whose
-# libraries live in a nested directory (lib/perl5/.../CORE/libperl.so) that the
-# $ORIGIN/../lib rpath rule does not reach, so keeping it would mean either a
-# permanently unresolved reference or a special case in patchelf.sh.
+# autoreconf, for PKG_SOURCE=git recipes that bootstrap a checkout.  Same
+# category as m4 -- a generator, wanted only while building.  libltdl is
+# libtool's runtime library and arrives with it; nothing in the stack links it.
+autoconf
+automake
+libtool
+libltdl
+# perl is not requested directly.  It used to arrive as a git dependency; git
+# has since moved to the builder image, and perl now arrives instead as an
+# autoconf/automake dependency -- conda-forge builds both against it, which is
+# what the 'pl5321' in their build strings means.  Same package, same reason to
+# drop it, different sponsor.
+#
+# It is also the one package whose libraries live in a nested directory
+# (lib/perl5/.../CORE/libperl.so) that the $ORIGIN/../lib rpath rule does not
+# reach, so keeping it would mean either a permanently unresolved reference or a
+# special case in patchelf.sh.
 perl
 
 # --- glibc floor offenders -----------------------------------------------
