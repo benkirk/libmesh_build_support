@@ -41,8 +41,9 @@ export LIBMESH_DIR="${LIBMESH_DIR:-${STACK}}"
 export TRILINOS_DIR="${TRILINOS_DIR:-${STACK}}"
 export MPIEXEC="${MPIEXEC:-${STACK}/bin/mpiexec}"
 
-# activate.sh is S4's deliverable; until it exists, put the stack on PATH
-# ourselves.  mpicc invokes <triplet>-cc by name and fails confusingly without.
+# activate.sh is installed by the relocate stage, so before it the stack goes
+# on PATH by hand.  mpicc invokes <triplet>-cc by name and fails confusingly
+# without it.
 if [ -r "${STACK}/activate.sh" ]; then
   # shellcheck disable=SC1091
   . "${STACK}/activate.sh"

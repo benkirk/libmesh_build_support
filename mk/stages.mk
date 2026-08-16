@@ -200,8 +200,8 @@ conda-lock:
 	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
 
 ## shell: an interactive shell with $(STACK)/bin on PATH
-# Deliberately minimal.  Once S4 lands, $(STACK)/activate.sh is the real entry
-# point and this becomes a thin wrapper around it.
+# Deliberately minimal.  $(STACK)/activate.sh, installed by relocate, is the
+# real entry point; this exists for the stages before it.
 shell: $(STAMPS)/conda.stamp
 	$(SAY) SHELL '$(STACK)'
 	$(Q)env $(PKG_ENV) PATH='$(STACK)/bin':"$$PATH" bash -i

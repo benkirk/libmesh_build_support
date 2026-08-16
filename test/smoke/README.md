@@ -1,10 +1,10 @@
 # Smoke example
 
-The libMesh example eventually lands here, replacing `smoke.c`. Until then this
-directory holds a **staged placeholder** that grows as packages arrive — MPI
-only today, plus a PETSc `VecCreate` once PETSc builds, then libMesh, and
-finally libMesh's own `introduction_ex4`. The contract below does not change as
-it grows, so the real example drops in without touching `test/run.sh`.
+Two binaries, one Makefile: `smoke.c`, the MPI rank check whose contract is
+below, and libMesh's own `introduction_ex4`, built with `libmesh-config` and
+installed beside it, which `test/run.sh` runs in 1D/2D/3D, serial and on N
+ranks. `smoke.c` stays because its assertion is the one that catches a binary
+that is not really MPI-linked.
 
 ## Contract
 
