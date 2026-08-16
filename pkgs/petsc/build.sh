@@ -50,6 +50,29 @@ case "${BLAS_PROVIDER}" in
   *)        blaslapack=( "--with-blaslapack-lib=${STACK}/lib/libopenblas.so" ) ;;
 esac
 
+# PETSc searches PATH for a bare 'ar' and explicitly IGNORES $AR -- it says so,
+# in its own configure output -- then stops with
+#
+#     Could not find a suitable archiver.  Use --with-ar to specify an archiver.
+#
+# conda's binutils ships only triplet-prefixed names (x86_64-conda-linux-gnu-ar)
+# and the builder image installs no binutils at all, deliberately.  So this
+# worked only on base images that happen to carry their own: measured,
+# almalinux 8 and 9 ship /usr/bin/ar and /usr/bin/ranlib, ubuntu and
+# opensuse/leap ship neither.  The RHEL bases were quietly lending PETSc an
+# archiver, exactly as they were quietly lending the ISA selftest an objdump.
+#
+# Naming the toolchain's own is what PETSc's error message asks for, and it is
+# the same rule the compilers already follow: what the host happens to carry is
+# not this build's business.
+ar_bin="$(command -v "${AR:-ar}" 2>/dev/null || true)"
+ranlib_bin="$(command -v "${RANLIB:-ranlib}" 2>/dev/null || true)"
+[ -n "${ar_bin}" ] \
+  || { echo "no archiver: neither \$AR nor a bare 'ar' is on PATH" >&2; exit 1; }
+[ -n "${ranlib_bin}" ] \
+  || { echo "no ranlib: neither \$RANLIB nor a bare 'ranlib' is on PATH" >&2; exit 1; }
+log "archiver ${ar_bin}, ranlib ${ranlib_bin}"
+
 # Note there is no --with-hdf5 here.  v0's PETSc had none either -- HDF5 enters
 # the stack through libMesh, which is where the mesh I/O actually lives.
 #
@@ -81,6 +104,8 @@ python3 ./configure \
     --with-cc="$(command -v mpicc)" \
     --with-cxx="$(command -v mpicxx)" \
     --with-fc="$(command -v mpif90)" \
+    --with-ar="${ar_bin}" \
+    --with-ranlib="${ranlib_bin}" \
     --CFLAGS="-g -O2 -Wno-implicit-function-declaration" \
     --CXXFLAGS="-g -O2" \
     --FFLAGS="-g -O2 -fallow-argument-mismatch"
