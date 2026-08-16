@@ -142,11 +142,12 @@ uses their own compiler; `mpicc -show` and `MPICH_CC` still serve them.
 
 ## Things that will bite you
 
-- **`dlopen`ed plugins are invisible to `ldd`**, which is why pruning is by
-  whole conda package and `slim.sh` removes only fixed directories by name;
-  files a source build installs are never pruned. Keep runtime-loaded modules
-  under the tree, and out of `include/`, `lib/pkgconfig`, `lib/cmake` and
-  `bin/*-config` if `SLIM_PROFILE=runtime` is in use.
+- **`dlopen`ed plugins are invisible to `ldd`**, which is why `prune.sh` works
+  by whole conda package and never touches files a source build installed, and
+  `slim.sh` removes only named directories and file patterns (`.la`, `.a`, docs;
+  under `SLIM_PROFILE=runtime` also `include/`, pkgconfig, cmake, `*-config`
+  and the UCX GPU plugins) — never by closure. Keep runtime-loaded modules under
+  the tree and out of those paths.
 - **Absolute paths in generated text files** (`.pc`, `*Config.cmake`,
   `*-config` scripts) must be rewritten. `relocate/fixup-text.sh` handles the
   common cases; check yours with `grep -r "$BUILD_ROOT" "$STACK"`.

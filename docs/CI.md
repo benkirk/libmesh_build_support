@@ -45,8 +45,8 @@ Four decisions behind that shape:
 - **The fast gate is separate from the expensive one.** Most mistakes here are
   catchable in two minutes without building anything; A1 was that class of
   break, and `make -n all` under `-j8` is what catches it.
-- **`ci.yml` builds from the checked-in lock where one exists; `extended.yml`
-  solves from the spec.** A lock can never report that `conda/env/*.yml` has
+- **`ci.yml` builds from the checked-in lock where one exists; `extended.yml`'s
+  `fresh-solve` solves from the spec.** A lock can never report that `conda/env/*.yml` has
   stopped resolving to something that works, so `fresh-solve` ignores it weekly
   and publishes the lock that solve produced. Today only `linux-aarch64` has a
   lock; `linux-64` re-solves on every run (A37).
@@ -88,7 +88,7 @@ SIGINT as "stop this container"; the default TERM would orphan it.
 | name | contents |
 |---|---|
 | `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz` |
-| `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, `lock/` (the checked-in locks, plus the fresh one when `refresh_lock` ran), `df.txt` |
+| `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, `lock/` (the checked-in locks, overwritten by the fresh solve when `refresh_lock` ran), `df.txt` |
 | `result-build-…`, `result-verify-…-<base>` | one JSON per job, for `summarise` |
 
 **Images.** On `main`, `ci.yml` also pushes two images per configuration to
@@ -116,7 +116,7 @@ Each build job writes a block headed `<platform> · <blas> · <mpi>`:
 `summarise` then renders one **Stack matrix** table (configuration, result,
 time, tarball, size, packages, floor, ISA), a **Verify** grid — one column per
 base image, each cell ✅/❌ and duration, with a collapsed list underneath of the
-distro and glibc each image *actually* ran, parsed back out of the verify log —
+glibc each image *actually* ran, parsed back out of the verify log —
 and, when an `experimental: true` job failed, a section saying so. The run stays
 green; the failure is on the page. Before that section existed an experimental
 red was invisible (PR #14).
@@ -136,8 +136,7 @@ All but `fresh-solve` are `experimental: true`; all but `fresh-solve` and `mkl`
 verify on two bases (`almalinux:8`, `ubuntu:24.04`) rather than five — if a
 closure change breaks relocation it breaks on both, and the middle three add
 nothing. On dispatch `only=<job>` runs one; a job added here needs its own
-`only` guard, or it runs on every named dispatch and `only=<it>` selects
-nothing. GitHub disables a schedule after 60 days of repository inactivity, and
+`only` guard, or it runs on every named dispatch. GitHub disables a schedule after 60 days of repository inactivity, and
 a silent extended matrix is a green one — check that it is still running.
 
 Not wired, deliberately: `MPI_FAMILY=openmpi` (needs an env spec, a meaningful
