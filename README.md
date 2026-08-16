@@ -46,6 +46,25 @@ the only thing that crosses between them. On Apple Silicon `PLATFORM=linux/arm64
 is native and is a real target; `linux/amd64` runs under Rosetta and is required
 for `BLAS_PROVIDER=mkl`.
 
+## Pulling a published image
+
+CI publishes two images per configuration — `builder` (the provisioned
+toolchain) and `devel` (toolchain *plus* the built stack, the one to reach for).
+To pull the image matching your checkout and drop into a shell:
+
+```sh
+make image-shell                        # devel, for the current make config
+STAGE=builder make image-shell          # the toolchain-only image
+docker/pull-shell.sh                    # same, straight from the compose loop
+```
+
+The tag is a *content hash* of the config and recipes, computed by the same
+`inputs-sha.sh` that named the image when CI pushed it — so on the commit that
+built an image this reproduces its reference exactly, and a tree CI never built
+resolves to a tag that simply isn't there. Inside `devel`, drop a recipe into
+`site/` and `make build` compiles only that addition; every tracked package is
+already accounted for.
+
 ## How it fits together
 
 | | |

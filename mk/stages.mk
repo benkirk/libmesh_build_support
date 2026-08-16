@@ -15,7 +15,8 @@
 # it is not a gate.
 
 .PHONY: all conda wrappers wrappers-check build test relocate validate slim \
-        dist distcheck help shell clean distclean conda-lock print-config
+        dist distcheck help shell image-shell clean distclean conda-lock \
+        print-config
 
 ## all: the whole workflow, conda through distcheck
 all: distcheck
@@ -204,6 +205,18 @@ conda-lock:
 shell: $(STAMPS)/conda.stamp
 	$(SAY) SHELL '$(STACK)'
 	$(Q)env $(PKG_ENV) PATH='$(STACK)/bin':"$$PATH" bash -i
+
+## image-shell: pull the published image for this config and shell into it
+# The remote counterpart of 'shell': no local build root needed.  Names the tag
+# the same way CI did (STAGE=devel by default), pulls it, and drops in with the
+# stack on PATH.  STAGE=builder for the toolchain-only image; STAGE, TARGET_PLATFORM,
+# BLAS_PROVIDER, MPI_FAMILY, ... = ... to select a different published config.
+image-shell:
+	$(Q)STAGE='$(STAGE)' TARGET_PLATFORM='$(TARGET_PLATFORM)' \
+	  BLAS_PROVIDER='$(BLAS_PROVIDER)' MPI_FAMILY='$(MPI_FAMILY)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
+	  GCC_VERSION='$(GCC_VERSION)' \
+	  bash docker/pull-shell.sh
 
 ## print-config: show the resolved knobs and paths
 print-config:
