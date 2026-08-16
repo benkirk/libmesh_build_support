@@ -233,6 +233,38 @@ else
   bad "'cc' via PATH failed to compile (recursion?)"
 fi
 
+echo "--- 7b. binutils resolve to the toolchain, not to the base image"
+# The regression this guards is silent on almalinux and fatal on Debian: conda
+# ships only triplet-prefixed binutils, so a bare 'ar' resolves to whatever the
+# base image happens to carry -- and three of the five supported bases carry
+# nothing.  Asserting the RESOLVED PATH rather than mere existence is the point;
+# /usr/bin/ar existing would satisfy 'command -v' while proving the opposite of
+# what this checks.
+bu_bad=0
+for tool in ar ranlib nm strip objdump; do
+  if ! [ -e "${BIN}/${tool}" ]; then
+    bad "no '${tool}' in ${BIN}: a site package calling it would get the base image's, or none"
+    bu_bad=$((bu_bad + 1)); continue
+  fi
+  got="$( PATH="${BIN}:${STACK}/bin:${PATH}" command -v "${tool}" )"
+  target="$(readlink -f "${got}")"
+  case "${target}" in
+    "${STACK}"/*) ;;
+    *) bad "'${tool}' on PATH resolves to ${got} -> ${target}, outside ${STACK}"
+       bu_bad=$((bu_bad + 1)); continue ;;
+  esac
+  # Inside $STACK is necessary but not sufficient.  conda ships <triplet>-nm and
+  # <triplet>-gcc-nm side by side -- the latter is GCC's LTO wrapper, not the
+  # binutils tool -- and both live here, so a path check alone accepts the wrong
+  # one.  It did, until this line: the first version of the shims linked nm to
+  # gcc-nm and every other assertion still passed.
+  case "$(basename "${target}")" in
+    *-gcc-"${tool}") bad "'${tool}' resolves to GCC's LTO wrapper $(basename "${target}"), not binutils"
+                     bu_bad=$((bu_bad + 1)) ;;
+  esac
+done
+[ "${bu_bad}" -eq 0 ] && ok "ar/ranlib/nm/strip/objdump all resolve inside the toolchain"
+
 echo "--- 8. a linked executable still runs"
 cat > "${TMP}/hello.cc" <<'EOF'
 #include <string>

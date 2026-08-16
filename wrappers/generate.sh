@@ -195,6 +195,63 @@ done
 wrapped="$(ls -1 "${BIN}" | wc -l)"
 
 #------------------------------------------------------------------------------
+# Binutils, under the names build systems actually look for.
+#
+# conda installs binutils only under triplet-prefixed names --
+# x86_64-conda-linux-gnu-ar and friends -- and docker/Dockerfile.builder
+# installs none at all, deliberately: binutils compiles and inspects, so the
+# conda env owns it and the host does not.  The gap between those two facts is
+# that anything asking for a bare 'ar' falls through to whatever the base image
+# happens to carry, and that is a lottery.  Measured across the five supported
+# bases: almalinux 8 and 9 ship ar, ranlib and objdump; ubuntu 22.04, ubuntu
+# 24.04 and opensuse/leap:15 ship none of them.
+#
+# Three separate consumers were living on that accident, and each failed
+# differently and unhelpfully the first time anyone built on a Debian host:
+# PETSc's configure ("Could not find a suitable archiver"), TriBITS' Fortran
+# mangling probe ("CMAKE_AR-NOTFOUND qc libVerifyFortran.a"), and the ISA
+# selftest's control scan (which reported nothing above the baseline because it
+# had no disassembler to look with -- the worst of the three, since that one
+# reads as a pass).
+#
+# The tracked recipes now also name their tools explicitly, which is the right
+# fix for code we own.  These links are for the code we do NOT own: a site/
+# package that calls 'ar' or 'strip' the way essentially every autotools
+# project does, and which has no reason to know any of the above.  The point of
+# this directory has always been to make tool resolution independent of the
+# base image; binutils belongs in it for exactly the reason the compilers do.
+#
+# ld and as are deliberately NOT here.  The compiler driver locates those
+# through its own -B paths, and putting ours ahead of it on PATH would be
+# changing how things link rather than making a missing tool findable.
+# The triplet is resolved once and the target named exactly, rather than globbed
+# for.  A glob is actively wrong here: conda ships BOTH <triplet>-nm and
+# <triplet>-gcc-nm (likewise ar and ranlib), the second being GCC's LTO wrapper
+# rather than the binutils tool.  'ls *-nm | head -1' picks gcc-nm, because 'g'
+# sorts before 'n' -- while the same expression picks the right thing for 'ar',
+# because 'a' sorts before 'g'.  Measured, after writing it the wrong way first:
+# a build asking for 'nm' would have quietly got the LTO wrapper.
+triplet=""
+for c in "${STACK}"/bin/*-gcc; do
+  [ -x "${c}" ] || continue
+  triplet="$(basename "${c}")"; triplet="${triplet%-gcc}"; break
+done
+
+shimmed=0
+if [ -n "${triplet}" ]; then
+  for tool in ar ranlib nm strip objdump objcopy readelf addr2line size strings c++filt; do
+    [ -e "${BIN}/${tool}" ] && continue
+    real="${STACK}/bin/${triplet}-${tool}"
+    [ -x "${real}" ] || continue
+    ln -s "${real}" "${BIN}/${tool}"
+    printf '  %-40s %s  (binutils)\n' "${tool}" "${real#"${STACK}"/}"
+    shimmed=$((shimmed + 1))
+  done
+else
+  echo "  WARNING: no <triplet>-gcc in ${STACK}/bin; binutils not exposed" >&2
+fi
+
+#------------------------------------------------------------------------------
 # env.sh: belt as well as braces.
 #
 # PATH order is the primary mechanism and covers any build that invokes the
@@ -214,3 +271,4 @@ wrapped="$(ls -1 "${BIN}" | wc -l)"
 } > "${OUT}/env.sh"
 
 echo "  ${wrapped} wrapper(s) in ${BIN}, pinning ${ISA_BASELINE}"
+echo "  ${shimmed} binutils tool(s) exposed under their bare names"
