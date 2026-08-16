@@ -52,8 +52,8 @@ $(eval $(call declare_pkg))
 ```
 
 `declare_pkg` snapshots these into namespaced variables, so every recipe can use
-the same plain `PKG_*` names without clobbering its neighbours. Assign with
-`:=`, never `?=` — the snapshot clears each name afterwards, leaving it
+the same plain `PKG_*` names without clobbering its neighbors. Assign with
+`:=`, never `?=` — the snapshot clears each name afterward, leaving it
 *defined-but-empty*, so a `?=` in any package included after the first silently
 does nothing.
 

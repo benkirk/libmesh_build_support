@@ -11,7 +11,7 @@ in [`plans/implemented/RELOCATABLE-STACK-PLAN.md`](plans/implemented/RELOCATABLE
 |---|---|---|
 | `checks.yml` | pushes to `main`, every PR, on demand | the fast gate: does it parse, lint, order itself, do the ISA regexes still match, does every base image build, do the docs' links resolve — about two minutes |
 | `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | the default configuration on `linux-64` **and** `linux-aarch64`, verified on all five base images; on `main` it also publishes the builder and devel images |
-| `stack.yml` | called, never triggered | the reusable build-and-verify implementation, parameterised |
+| `stack.yml` | called, never triggered | the reusable build-and-verify implementation, parameterized |
 | `extended.yml` | Mondays 06:17 UTC, and on demand | the knobs nobody runs daily: fresh conda solve, MKL, parallel HDF5, libMesh from git, a Debian-family builder, the `customer_demo` branch |
 | `customer-demo.yml` | push to `main`, nightly | rebases the `customer_demo` branch onto `main`, verifies it, force-pushes with lease — the one workflow with `contents: write` |
 | `prune-ghcr.yml`, `prune-runs.yml` | monthly, and on demand | keep N images per configuration line; delete runs older than N days. Manual dispatch is a dry run by default; the cron is not |
@@ -78,7 +78,7 @@ job's result sidecar into one table, whether or not the jobs passed.
 **Budgets are per step, not per job.** `make conda` 45 min, `make build`
 120, `make all` 90 (the ISA bench, when requested, another 45), asserted at
 the start of the job to fit under a 350-minute backstop. A *job* timeout
-cancels the job, and a cancelled job does not run its remaining steps — not
+cancels the job, and a canceled job does not run its remaining steps — not
 even `if: always()` ones — so the run that most needs its logs is exactly the
 run that would lose them. `--signal=INT` because `docker compose run` treats
 SIGINT as "stop this container"; the default TERM would orphan it.
