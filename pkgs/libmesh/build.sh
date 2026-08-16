@@ -18,12 +18,28 @@
 
 activate_toolchain
 list_build_env
-require curl tar make
+require make
+case "${PKG_SOURCE}" in
+  # git mode needs no curl/tar, and the tarball needs no autotools: the release
+  # archive is already bootstrapped, which is the whole difference between them.
+  tarball) require curl tar ;;
+  git)     require git autoconf automake libtool ;;
+esac
 
-download_src "${PKG_URL}"
+fetch_src
 
 src="${BUILD_TMP}/${PKG_NAME}-${PKG_VERSION}"
 [ -d "${src}" ] || { echo "unexpected source layout under ${BUILD_TMP}" >&2; ls "${BUILD_TMP}" >&2; exit 1; }
+
+# A checkout has no configure script -- 'make dist' is what generates one, and
+# that is exactly what we skipped.  Tailed into the log because autoreconf over
+# libMesh's contrib tree is long and only its ending is usually interesting.
+if [ "${PKG_SOURCE}" = git ]; then
+  log "bootstrapping (autoreconf); this takes a few minutes"
+  ( cd "${src}" && ./bootstrap ) 2>&1 | tail -40
+  [ -x "${src}/configure" ] \
+    || { echo "./bootstrap produced no configure script" >&2; exit 1; }
+fi
 
 # Out-of-tree, as in v0.
 mkdir -p "${BUILD_TMP}/${PKG_NAME}-build"
@@ -95,13 +111,30 @@ export PETSC_ARCH=""
 # whatever the sub-configure decided about HDF5 is by definition what the netcdf
 # being built supports, so this stays correct if the HDF5 knob changes, and is a
 # no-op against a git checkout where the header is already right.
+#
+# This runs in BOTH source modes, deliberately.  Against a git checkout the copy
+# is a no-op -- the checked-in header is already 1/1 -- and running it anyway
+# keeps the two modes on one code path and turns the assertion below into a
+# cross-check that git's header really is right.  Only the missing-file case is
+# mode-dependent: a tarball build has no other source of truth and must stop,
+# while a checkout does, so assert against that instead of failing.
 gen="contrib/netcdf/v4/include/netcdf_meta.h"
-[ -f "${gen}" ] || { echo "no generated ${gen}; libMesh's contrib layout changed" >&2; exit 1; }
-grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${gen}" \
-  || { echo "generated netcdf_meta.h reports no HDF5 support:" >&2
-       grep NC_HAS_HDF5 "${gen}" >&2; exit 1; }
-cp -f "${gen}" "${src}/${gen}"
-log "installed configure's netcdf_meta.h over the stale checked-in one"
+if [ -f "${gen}" ]; then
+  grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${gen}" \
+    || { echo "generated netcdf_meta.h reports no HDF5 support:" >&2
+         grep NC_HAS_HDF5 "${gen}" >&2; exit 1; }
+  cp -f "${gen}" "${src}/${gen}"
+  log "installed configure's netcdf_meta.h over the checked-in one"
+elif [ "${PKG_SOURCE}" = git ]; then
+  # In git, contrib/netcdf/v4 is a symlink to contrib/netcdf/netcdf-c-4.6.2 and
+  # the header it points at is correct.  Assert that rather than repair it.
+  grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${src}/${gen}" \
+    || { echo "git checkout's ${gen} reports no HDF5 support:" >&2
+         grep NC_HAS_HDF5 "${src}/${gen}" >&2; exit 1; }
+  log "no generated header; git checkout's own is already correct (A29)"
+else
+  echo "no generated ${gen}; libMesh's contrib layout changed" >&2; exit 1
+fi
 
 make ${MAKE_J_L}
 make install
