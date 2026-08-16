@@ -92,11 +92,20 @@ runs conda → relocate → validate → slim → dist → `distcheck`, and the 
 it produces has been unpacked and run on distros from glibc 2.28 to 2.39. Every
 pull request re-runs that, on both architectures, across five base images.
 
-What it does *not* yet contain is the point of the exercise: the PETSc, libMesh
-and Trilinos recipes are not written, so today's tarball is the conda
-environment and a placeholder MPI smoke test. See the sprint breakdown in the
-design doc, and [`docs/HANDOFF.md`](docs/HANDOFF.md) for what is verified
-versus what is not.
+The PETSc, Trilinos and libMesh recipes are written, and the tarball is the
+full source stack rather than a placeholder: 107 MB, ~340 ELF objects, every
+one of them within the ISA baseline. It has been unpacked on `almalinux:8`
+(glibc 2.28, the floor) and `ubuntu:24.04` and run there — `introduction_ex4`
+in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary, in an image with
+no compiler, no python and no binutils.
+
+libMesh also builds from git rather than only from the release tarball
+(`make LIBMESH_SOURCE=git`), which is a cross-check on the tarball path rather
+than a replacement for it: the default ref is `v$(LIBMESH_VERSION)`, so the two
+modes build the same version and are expected to agree.
+
+See [`docs/HANDOFF.md`](docs/HANDOFF.md) for the measured numbers and, more
+usefully, for what is *still* not verified.
 
 ## CI
 

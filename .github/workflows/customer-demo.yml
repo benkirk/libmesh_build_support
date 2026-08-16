@@ -1,0 +1,230 @@
+# Keep the customer_demo branch riding on top of main -- and prove it still
+# works while doing it.
+#
+# customer_demo carries a worked example of a customer's OWN package stack
+# (customer/gust-core, then customer/gust-app on top of it) layered onto this
+# repo through the SITE_DIRS extension point.  Its contract is that it only
+# ever ADDS files, so that its diff against main reads as nothing but package
+# additions and it can be rebased indefinitely.
+#
+# WHY THIS FILE IS ON MAIN AND NOT ON THAT BRANCH
+#
+# Two reasons, and the first is a hard constraint:
+#
+#   1. Nothing on customer_demo can notice that main moved.  GitHub runs
+#      'schedule:' workflows only from the default branch, and a
+#      'push: branches: [main]' workflow is read from main's copy of the tree.
+#      A rebase bot living on the branch it maintains would never fire.
+#
+#   2. With the CI here, customer_demo contains customer/ and nothing else.
+#      That is the point of the demo: someone reading the diff should see a
+#      customer's packages, not a customer's packages plus a workflow file.
+#
+# A useful consequence of (2): the "pushes made with GITHUB_TOKEN do not
+# trigger further workflows" rule, which would normally make a rebase bot's
+# push land untested, does not bite -- there are no workflows on the branch to
+# trigger.  Everything is verified HERE, before the push, against the rebased
+# tree itself.
+name: customer-demo
+
+on:
+  push:
+    branches: [main]
+  # Nightly safety net: catches a demo branch that has quietly stopped building
+  # even on a week when nothing was pushed to main.
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  # The only workflow in this repo that needs write, and only for the force
+  # push at the end.  Everything before it is read-only.
+  contents: write
+
+concurrency:
+  # NOT cancel-in-progress: two runs racing on a force-push to the same branch
+  # is the one thing this job must never do.  Queue them instead.
+  group: customer-demo
+  cancel-in-progress: false
+
+env:
+  DEMO_BRANCH: customer_demo
+
+jobs:
+  rebase-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # Falls back to the job token.  The PAT is preferred only so the push
+          # is attributable to a person rather than to github-actions[bot];
+          # nothing here depends on it triggering another workflow.
+          token: ${{ secrets.BENKIRK_GITHUB_TOKEN || github.token }}
+
+      - name: Does the demo branch exist?
+        id: exists
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "${DEMO_BRANCH}" >/dev/null 2>&1; then
+            echo "found=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::no ${DEMO_BRANCH} branch; nothing to maintain"
+          fi
+
+      - name: Rebase onto main
+        id: rebase
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          git fetch --quiet origin main "${DEMO_BRANCH}"
+          before="$(git rev-parse "origin/${DEMO_BRANCH}")"
+          git checkout --quiet -B "${DEMO_BRANCH}" "origin/${DEMO_BRANCH}"
+
+          # A branch that only adds files can only conflict if main added a
+          # file at one of the same paths.  That is a real event worth stopping
+          # for -- never resolve it here.
+          if ! git rebase origin/main; then
+            git rebase --abort || true
+            echo "::error::${DEMO_BRANCH} does not rebase cleanly onto main."
+            echo "::error::main has almost certainly added a file at a path the demo also adds."
+            git --no-pager diff --name-only "origin/${DEMO_BRANCH}" \
+              "$(git merge-base "origin/${DEMO_BRANCH}" origin/main)" | sed 's/^/  /'
+            exit 1
+          fi
+
+          after="$(git rev-parse HEAD)"
+          echo "before=${before}" >> "$GITHUB_OUTPUT"
+          echo "after=${after}"   >> "$GITHUB_OUTPUT"
+          if [ "${before}" = "${after}" ]; then
+            echo "changed=no" >> "$GITHUB_OUTPUT"
+            echo "already on top of main (${after})"
+          else
+            echo "changed=yes" >> "$GITHUB_OUTPUT"
+            echo "rebased ${before} -> ${after}"
+          fi
+
+      #-------------------------------------------------------------------------
+      # Everything below runs against the REBASED tree, before it is pushed.
+      # A demo branch that no longer works is not worth keeping current.
+
+      - name: Only adds to main
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          base="$(git merge-base origin/main HEAD)"
+          violations="$(git diff --name-status "${base}" HEAD | grep -v '^A' || true)"
+          if [ -n "${violations}" ]; then
+            echo "::error::${DEMO_BRANCH} must only ADD files; found:"
+            echo "${violations}"
+            exit 1
+          fi
+          echo "$(git diff --name-only "${base}" HEAD | wc -l) file(s) added, 0 modified or deleted"
+          git diff --name-only "${base}" HEAD | sed 's/^/  + /'
+
+      - name: Packages are discovered, and ordered A before B
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          pkgs="$(make SITE_DIRS=customer print-config | awk '/^PACKAGES /{$1=""; print}')"
+          echo "discovered:${pkgs}"
+          for p in gust-core gust-app; do
+            case "${pkgs}" in
+              *"${p}"*) echo "  ok ${p}" ;;
+              *) echo "::error::${p} was not discovered"; exit 1 ;;
+            esac
+          done
+
+          make SITE_DIRS=customer -n build > /tmp/graph.txt
+          line_of () {
+            n="$(grep -n "BUILD '$1-" /tmp/graph.txt | head -1 | cut -d: -f1)"
+            [ -n "${n}" ] || { echo "::error::no BUILD line for $1"; exit 1; }
+            echo "${n}"
+          }
+          lm="$(line_of libmesh)"; a="$(line_of gust-core)"; b="$(line_of gust-app)"
+          echo "libmesh@${lm} -> gust-core@${a} -> gust-app@${b}"
+          [ "${lm}" -lt "${a}" ] || { echo "::error::gust-core not ordered after libmesh"; exit 1; }
+          [ "${a}" -lt "${b}" ]  || { echo "::error::gust-app not ordered after gust-core"; exit 1; }
+
+          make SITE_DIRS=customer -n all >/dev/null
+          make SITE_DIRS=customer -j8 -n all >/dev/null
+
+      - name: Default build is untouched
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          pkgs="$(make print-config | awk '/^PACKAGES /{$1=""; print}')"
+          echo "default packages:${pkgs}"
+          case "${pkgs}" in
+            *gust*) echo "::error::customer packages leaked into the default build"; exit 1 ;;
+            *) echo "  ok" ;;
+          esac
+
+      - name: Git source mode is wired through the framework
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          out="$(make SITE_DIRS=customer GUST_SOURCE=git print-config | grep 'PACKAGES (git)')"
+          echo "${out}"
+          for want in 'gust-core@v' 'gust-app@v'; do
+            case "${out}" in
+              *"${want}"*) echo "  ok ${want}" ;;
+              *) echo "::error::${want} missing from the git-source report"; exit 1 ;;
+            esac
+          done
+
+      - name: Install gfortran
+        if: steps.exists.outputs.found == 'yes'
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y gfortran
+
+      # Builds and RUNS all three of package B's front-ends -- C, C++/OpenMP and
+      # Fortran 2003 -- against a mock of package A, so the cross-language ABI
+      # is exercised without needing conda, PETSc or libMesh.  A Fortran BIND(C)
+      # type that disagrees with the C struct is not a diagnostic in either
+      # language, so executing them is the only thing that catches it.
+      - name: C / C++ OpenMP / Fortran 2003 against package A's ABI
+        if: steps.exists.outputs.found == 'yes'
+        run: bash customer/test/abi-check.sh
+
+      - name: No front-end names the stack
+        if: steps.exists.outputs.found == 'yes'
+        run: |
+          set -euo pipefail
+          if grep -nE '(#include[[:space:]]*[<"]|use[[:space:]]+)(mpi|petsc|libmesh|hdf5)' \
+               customer/gust-app/src/*; then
+            echo "::error::a gust-app front-end reaches past package A"
+            exit 1
+          fi
+          echo "  ok"
+
+      #-------------------------------------------------------------------------
+      - name: Push the rebased branch
+        if: steps.exists.outputs.found == 'yes' && steps.rebase.outputs.changed == 'yes'
+        env:
+          BEFORE: ${{ steps.rebase.outputs.before }}
+        run: |
+          set -euo pipefail
+          # --force-with-lease against the sha we actually rebased from, so a
+          # push that landed on the branch while this job was running aborts
+          # here instead of being silently discarded.
+          git push --force-with-lease="${DEMO_BRANCH}:${BEFORE}" origin "${DEMO_BRANCH}"
+          echo "pushed $(git rev-parse --short HEAD)"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### customer_demo"
+            if [ "${{ steps.exists.outputs.found }}" != 'yes' ]; then
+              echo "Branch does not exist; nothing to do."
+            elif [ "${{ steps.rebase.outputs.changed }}" = 'yes' ]; then
+              echo "Rebased onto main and pushed: \`${{ steps.rebase.outputs.after }}\`"
+            else
+              echo "Already on top of main; verified, nothing to push."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
