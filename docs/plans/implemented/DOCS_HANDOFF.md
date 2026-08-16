@@ -1,6 +1,11 @@
 # Plan: documentation reorganisation
 
-**Status:** planned, not started. Pick this up in a fresh session.
+**Status: implemented.** The layout below is what was built: `README.md`,
+`docs/DESIGN.md`, `docs/CI.md`, a refreshed `docs/EXTENDING.md`, the sprint
+documents moved here, and `.github/scripts/check-md-links.py` gating every
+link. Two corrections found on the way: the amendments run A1–A39 (A35 was
+never issued), and there are seven workflows, not four. What follows is the
+plan as written.
 
 ## Context
 
