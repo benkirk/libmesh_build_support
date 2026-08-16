@@ -35,6 +35,7 @@ everything like it.
 import argparse
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -295,8 +296,35 @@ def main(argv=None):
             if m in (EM_X86_64, EM_AARCH64):
                 targets.append((p, root, objdump, m))
 
+    # PROCESSES, not threads.  subprocess.run(objdump) releases the GIL and
+    # parallelises fine, but instructions() and the regex searches after it are
+    # pure Python and hold it -- so under threads that half ran serially however
+    # many workers were asked for.  Measured on the real stack, 4 vCPU, by
+    # relocate/isa-bench.py:
+    #
+    #                     aarch64   linux-64
+    #   objects             906       915
+    #   disassembly        4.0 GB    4.2 GB
+    #   objdump alone       45 s      60 s
+    #   python            127 s    1207 s     <- 95% of linux-64's wall time
+    #   threads (before)  172 s    1267 s
+    #   processes (after)  80 s     596 s
+    #
+    # 11 minutes off every linux-64 build, 1.5 off aarch64, and the bench
+    # confirmed the two executors produce IDENTICAL results on both -- which is
+    # the only reason a correctness gate gets to be made faster.
+    #
+    # fork explicitly: scan_one lives in __main__ here, and wrappers/selftest.sh
+    # loads this file through importlib, so a spawned child re-importing it is
+    # a needless variable.  Linux is where this runs.
+    try:
+        mp_context = multiprocessing.get_context("fork")
+    except ValueError:                       # not POSIX; let the default decide
+        mp_context = None
+
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=a.jobs,
+                                                mp_context=mp_context) as pool:
         for rel, info in pool.map(scan_one, targets):
             results[rel] = info
 

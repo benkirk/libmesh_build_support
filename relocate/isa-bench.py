@@ -6,14 +6,37 @@ on linux-aarch64 for the same 341 objects, on native runners both times.  A 7x
 asymmetry that large is a fact about the code, not about the hardware, and this
 exists to find out which part.
 
-The hypothesis it was written to test: isa-scan.py uses a ThreadPoolExecutor.
+The hypothesis it was written to test: isa-scan.py used a ThreadPoolExecutor.
 subprocess.run(objdump) releases the GIL and parallelises properly, but
 instructions() -- splitlines, then a match and a sub per line -- and the four to
 six full-text regex searches after it are pure Python and hold the GIL, so that
-half is serialised across the workers no matter how many there are.  x86-64
-disassembly is far bulkier than aarch64 (OpenBLAS DYNAMIC_ARCH alone ships
-kernels for every microarchitecture), so the serialised half is much larger
-there.  If that is right, a ProcessPoolExecutor is close to a one-line fix.
+half was serialised across the workers no matter how many there were.  Confirmed,
+and the fix has landed: isa-scan.py uses processes.
+
+The second half of that hypothesis was WRONG, and this is what measuring it was
+for.  It guessed that x86-64 disassembly is far bulkier than aarch64 -- OpenBLAS
+DYNAMIC_ARCH shipping kernels for every microarchitecture -- and that the volume
+explained the 7x gap.  It does not.  The two architectures disassemble to almost
+exactly the same thing:
+
+                    aarch64   linux-64   ratio
+  ELF objects          906       915      1.01x
+  disassembly         4.0 GB    4.2 GB    1.05x
+  objdump alone        45 s      60 s     1.33x
+  python              127 s    1207 s     9.47x   <-- the entire asymmetry
+
+Same object count, same bytes, comparable objdump time.  The gap is the REGEX
+work alone: the x86 patterns cost 9.5x what the aarch64 ones do over the same
+volume of text.  Four searches against three is not nine, so the difference is
+in the patterns themselves -- X86_V3 alone is a sixteen-branch alternation, most
+branches anchored with \b, and Python's re tries each alternative at every
+position.
+
+That makes the remaining headroom architecture-specific, and worth knowing
+before anyone optimises further: after the switch to processes, objdump is 56%
+of what is left on aarch64 and only 10% on linux-64.  Cheaper matching would
+barely register on aarch64 and is nearly the whole cost on linux-64 -- which is
+also the slower build.
 
 It is a hypothesis.  This prints numbers instead of arguing:
 
