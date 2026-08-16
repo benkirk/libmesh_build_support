@@ -112,6 +112,28 @@ and **`ubuntu:24.04` (glibc 2.39)** — `validate --runtime` clean, then
 `introduction_ex4` in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary
 in an image with no compiler, no python and no binutils.
 
+**libMesh also builds from git**, not only from the release tarball
+(`make LIBMESH_SOURCE=git`). Measured on `linux-aarch64`, clean stack, `make
+conda` through `make distcheck` green: the mirror clone plus recursive
+submodules is 50 s cold and 229 MB cached, `./bootstrap` is 33 s against
+autoconf 2.72 / automake 1.17 / libtool 2.5.4, and the resulting artifact is
+**the same size and the same 336 objects** as the tarball build. That last part
+is the point — the two modes are a cross-check on each other, because the
+default ref is `v$(LIBMESH_VERSION)`.
+
+It also settles A29 from the inside. `contrib/netcdf/v4` really is a symlink to
+`contrib/netcdf/netcdf-c-4.6.2` in git, its `netcdf_meta.h` really does say
+`NC_HAS_NC4 1` / `NC_HAS_HDF5 1`, and `introduction_ex4` writes ExodusII output
+on a git build — which A29 asserted from the outside and nothing could test
+until there was a git build to test it with.
+
+Provisioning is split on purpose: **git is in the builder image** (a fetcher,
+like curl and tar) and **the autotools are in the conda env** (generators, and
+version-sensitive, so one pin serves every base image). `git-core` rather than
+`git` on the RHEL and SUSE families — `git` there is a metapackage pulling perl
+and openssh-clients, 76 packages against git-core's 6.4 MB, and git-core does
+everything this project asks of it.
+
 **The ISA result is the one to note**, and it now holds on both architectures:
 339/339 within `armv8.1-a` and 341/341 within `x86-64-v2`. That includes
 everything PETSc's six `--download-` TPLs built, each with its own build system
@@ -168,6 +190,14 @@ Do not re-discover these.
   finds `boost/version.hpp`, decides Boost is available, and dies on the
   `boost/chrono.hpp` that subset lacks. Incremental rebuilds are for diagnosis;
   the build that counts starts from a clean `$STACK`.
+- **Changing a package's source mode does not invalidate its stamp.**
+  `mk/pkg.mk`'s rule depends on dependency stamps and `build.sh` — not on the
+  version, the URL, the source mode or the git ref. So
+  `make LIBMESH_SOURCE=git build` over a tree already built from the tarball is
+  a silent no-op, and every downstream check then passes on the *old* build.
+  Delete the stamp when changing what is built rather than how. The same has
+  always been true of a version bump; it only became a trap worth naming when
+  there were two ways to build the same version.
 - **A checked-in lock silently shadows `conda/bootstrap.sh`'s spec list.** That
   is what a lock is for, and it cost two build cycles: editing the specs changes
   nothing, with no warning, and the package you added is simply not there. Use
