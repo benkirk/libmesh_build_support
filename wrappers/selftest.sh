@@ -82,7 +82,18 @@ above_baseline () {
   # here worth preserving.  The split above is the one that matters.
   # shellcheck disable=SC2155
   local report="${TMP}/scan-$(basename "${dir}").json"
-  "${PY}" "${TOPDIR}/relocate/isa-scan.py" --root "${dir}" --out "${report}" >/dev/null 2>&1
+  # --objdump is not optional here, and the reason is easy to miss.  isa-scan.py
+  # resolves objdump as <root>/bin/*-objdump and only then falls back to PATH --
+  # but 'root' here is a scratch directory of .o files with no bin/ in it, so it
+  # ALWAYS falls back.  The builder image installs no binutils (conda supplies
+  # it, deliberately), so on a base image that ships none of its own the scan
+  # finds no objdump, skips, and reports an empty file list -- which this test
+  # then reads as "nothing above the baseline".  Measured: almalinux 8 and 9
+  # ship /usr/bin/objdump, opensuse/leap:15 and both ubuntus do not.  Name the
+  # toolchain's own objdump and the base image stops mattering, which is the
+  # premise the builder image is built on.
+  "${PY}" "${TOPDIR}/relocate/isa-scan.py" --root "${dir}" --out "${report}" \
+    --objdump "${OBJDUMP}" >/dev/null 2>&1
   "${PY}" - "${report}" "${ISA_BASELINE}" "${TOPDIR}/relocate/isa-scan.py" <<'PY'
 import importlib.util, json, sys
 # The repo is bind-mounted into the container; do not litter it with .pyc.
@@ -118,6 +129,14 @@ REAL_CC="$(sed -n "s/^real='\(.*\)'$/\1/p" "${BIN}/cc" 2>/dev/null || true)"
 [ -n "${REAL_CC}" ] || REAL_CC="$(readlink -f "$(ls "${STACK}"/bin/*-gcc | head -1)")"
 REAL_CXX="$(readlink -f "$(ls "${STACK}"/bin/*-g++ | head -1)")"
 REAL_FC="$(readlink -f "$(ls "${STACK}"/bin/*-gfortran | head -1)")"
+
+# The toolchain's own objdump, for the same reason the compilers are taken from
+# the toolchain: what the base image happens to ship is not this test's business.
+# Fatal rather than skipped -- a scan with no disassembler cannot distinguish
+# "nothing above the baseline" from "I did not look", and this test's whole
+# purpose is to prove it can tell the difference.
+OBJDUMP="$(ls "${STACK}"/bin/*-objdump 2>/dev/null | head -1)"
+[ -n "${OBJDUMP}" ] || { echo "no objdump in ${STACK}/bin: cannot verify anything" >&2; exit 1; }
 
 echo "--- 1. negative control: the real compiler, permitted to exceed the baseline"
 if compile_with "${REAL_CC}" "${REAL_CXX}" "${REAL_FC}" "${TMP}/control"; then
@@ -213,6 +232,38 @@ if ( PATH="${BIN}:${STACK}/bin:${PATH}"
 else
   bad "'cc' via PATH failed to compile (recursion?)"
 fi
+
+echo "--- 7b. binutils resolve to the toolchain, not to the base image"
+# The regression this guards is silent on almalinux and fatal on Debian: conda
+# ships only triplet-prefixed binutils, so a bare 'ar' resolves to whatever the
+# base image happens to carry -- and three of the five supported bases carry
+# nothing.  Asserting the RESOLVED PATH rather than mere existence is the point;
+# /usr/bin/ar existing would satisfy 'command -v' while proving the opposite of
+# what this checks.
+bu_bad=0
+for tool in ar ranlib nm strip objdump; do
+  if ! [ -e "${BIN}/${tool}" ]; then
+    bad "no '${tool}' in ${BIN}: a site package calling it would get the base image's, or none"
+    bu_bad=$((bu_bad + 1)); continue
+  fi
+  got="$( PATH="${BIN}:${STACK}/bin:${PATH}" command -v "${tool}" )"
+  target="$(readlink -f "${got}")"
+  case "${target}" in
+    "${STACK}"/*) ;;
+    *) bad "'${tool}' on PATH resolves to ${got} -> ${target}, outside ${STACK}"
+       bu_bad=$((bu_bad + 1)); continue ;;
+  esac
+  # Inside $STACK is necessary but not sufficient.  conda ships <triplet>-nm and
+  # <triplet>-gcc-nm side by side -- the latter is GCC's LTO wrapper, not the
+  # binutils tool -- and both live here, so a path check alone accepts the wrong
+  # one.  It did, until this line: the first version of the shims linked nm to
+  # gcc-nm and every other assertion still passed.
+  case "$(basename "${target}")" in
+    *-gcc-"${tool}") bad "'${tool}' resolves to GCC's LTO wrapper $(basename "${target}"), not binutils"
+                     bu_bad=$((bu_bad + 1)) ;;
+  esac
+done
+[ "${bu_bad}" -eq 0 ] && ok "ar/ranlib/nm/strip/objdump all resolve inside the toolchain"
 
 echo "--- 8. a linked executable still runs"
 cat > "${TMP}/hello.cc" <<'EOF'

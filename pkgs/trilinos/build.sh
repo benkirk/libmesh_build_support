@@ -33,11 +33,33 @@ case "${BLAS_PROVIDER}" in
   *)   blas="${STACK}/lib/libopenblas.so"  ; lapack="${blas}" ;;
 esac
 
+# CMake derives the archiver from the compiler's own name -- it looks for
+# <toolchain-prefix>ar -- and the compiler here is 'mpif90', which carries no
+# prefix to derive one from.  So it falls back to a bare 'ar' on PATH, and
+# conda's binutils ships only x86_64-conda-linux-gnu-ar.  On a base image that
+# carries no /usr/bin/ar the link line comes out as
+#
+#     CMAKE_AR-NOTFOUND qc libVerifyFortran.a ...
+#
+# in TriBITS' Fortran/C mangling probe, before Trilinos configures at all.
+# Measured: almalinux 8 and 9 ship ar and ranlib, ubuntu and opensuse/leap ship
+# neither.  Same lender, same silence, as PETSc's archiver and the ISA
+# selftest's objdump -- this is the third consumer of the base image's binutils.
+ar_bin="$(command -v "${AR:-ar}" 2>/dev/null || true)"
+ranlib_bin="$(command -v "${RANLIB:-ranlib}" 2>/dev/null || true)"
+[ -n "${ar_bin}" ] \
+  || { echo "no archiver: neither \$AR nor a bare 'ar' is on PATH" >&2; exit 1; }
+[ -n "${ranlib_bin}" ] \
+  || { echo "no ranlib: neither \$RANLIB nor a bare 'ranlib' is on PATH" >&2; exit 1; }
+log "archiver ${ar_bin}, ranlib ${ranlib_bin}"
+
 # TPL_ENABLE_MPI=ON makes TriBITS locate mpicc/mpicxx/mpif90 on PATH, which
 # activate_toolchain has already pointed at $STACK/bin.  v0 relied on the same
 # thing; naming the compilers explicitly here would only duplicate it.
 cmake \
     -DCMAKE_INSTALL_PREFIX="${STACK}" \
+    -DCMAKE_AR="${ar_bin}" \
+    -DCMAKE_RANLIB="${ranlib_bin}" \
     -DTPL_ENABLE_MPI=ON \
     -DTrilinos_ENABLE_Sacado=ON \
     -DTrilinos_ENABLE_Pliris=ON \
