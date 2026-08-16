@@ -1,7 +1,7 @@
 # Build the stack once, then validate that same tarball everywhere.  §S7.
 #
 # This is a reusable workflow (workflow_call only) -- ci.yml calls it with the
-# default configuration, nightly.yml calls it with the extended axes.  There is
+# default configuration, extended.yml calls it with the extended axes.  There is
 # exactly one implementation of "build and verify", parameterised, because two
 # copies would disagree within a month.
 #

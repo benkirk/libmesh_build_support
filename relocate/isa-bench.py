@@ -6,14 +6,37 @@ on linux-aarch64 for the same 341 objects, on native runners both times.  A 7x
 asymmetry that large is a fact about the code, not about the hardware, and this
 exists to find out which part.
 
-The hypothesis it was written to test: isa-scan.py uses a ThreadPoolExecutor.
+The hypothesis it was written to test: isa-scan.py used a ThreadPoolExecutor.
 subprocess.run(objdump) releases the GIL and parallelises properly, but
 instructions() -- splitlines, then a match and a sub per line -- and the four to
 six full-text regex searches after it are pure Python and hold the GIL, so that
-half is serialised across the workers no matter how many there are.  x86-64
-disassembly is far bulkier than aarch64 (OpenBLAS DYNAMIC_ARCH alone ships
-kernels for every microarchitecture), so the serialised half is much larger
-there.  If that is right, a ProcessPoolExecutor is close to a one-line fix.
+half was serialised across the workers no matter how many there were.  Confirmed,
+and the fix has landed: isa-scan.py uses processes.
+
+The second half of that hypothesis was WRONG, and this is what measuring it was
+for.  It guessed that x86-64 disassembly is far bulkier than aarch64 -- OpenBLAS
+DYNAMIC_ARCH shipping kernels for every microarchitecture -- and that the volume
+explained the 7x gap.  It does not.  The two architectures disassemble to almost
+exactly the same thing:
+
+                    aarch64   linux-64   ratio
+  ELF objects          906       915      1.01x
+  disassembly         4.0 GB    4.2 GB    1.05x
+  objdump alone        45 s      60 s     1.33x
+  python              127 s    1207 s     9.47x   <-- the entire asymmetry
+
+Same object count, same bytes, comparable objdump time.  The gap is the REGEX
+work alone: the x86 patterns cost 9.5x what the aarch64 ones do over the same
+volume of text.  Four searches against three is not nine, so the difference is
+in the patterns themselves -- X86_V3 alone is a sixteen-branch alternation, most
+branches anchored with \b, and Python's re tries each alternative at every
+position.
+
+That makes the remaining headroom architecture-specific, and worth knowing
+before anyone optimises further: after the switch to processes, objdump is 56%
+of what is left on aarch64 and only 10% on linux-64.  Cheaper matching would
+barely register on aarch64 and is nearly the whole cost on linux-64 -- which is
+also the slower build.
 
 It is a hypothesis.  This prints numbers instead of arguing:
 
@@ -80,6 +103,22 @@ def objdump_only(args):
     return len(out.stdout)
 
 
+def objdump_and_instructions(args):
+    """objdump, plus instructions() -- but none of the pattern searches.
+
+    The middle term.  Subtracting the three passes gives the split inside the
+    Python half, which is the thing nobody has yet: instructions() does TWO
+    regex operations per line, a match and a sub, over ~100 million lines, while
+    the searches are four passes over the joined text.  Either could dominate,
+    and they call for completely different fixes -- so measure before choosing,
+    having already been wrong once about why x86 is slower.
+    """
+    path, _root, objdump, _machine = args
+    out = subprocess.run([objdump, "-d", "--no-show-raw-insn", path],
+                         capture_output=True, text=True, errors="replace")
+    return len(isa.instructions(out.stdout))
+
+
 def find_targets(root, objdump):
     targets = []
     for dirpath, _d, filenames in os.walk(root):
@@ -114,6 +153,11 @@ def main(argv=None):
                          "pass e.g. 1,2,4 to see how it scales, at the cost of "
                          "a full scan per count per executor)")
     ap.add_argument("--json", dest="json_out", default=None)
+    ap.add_argument("--compare-executors", action="store_true",
+                    help="also run the thread pool and diff its results against "
+                         "the process pool.  That question is settled -- x2.15 "
+                         "and x2.13, identical results -- and re-asking it costs "
+                         "a full serialised scan, 21 minutes on linux-64.")
     a = ap.parse_args(argv)
 
     root = os.path.abspath(a.root)
@@ -146,16 +190,6 @@ def main(argv=None):
     print(f"isa-bench: {len(targets)} ELF objects under {root}")
     print(f"           objdump {objdump}, {ncpu} cpus")
 
-    # The subprocess half on its own, at full width.  Everything above this in
-    # a full scan is Python.
-    secs, sizes = timed(lambda: run_pool(
-        concurrent.futures.ThreadPoolExecutor, targets, ncpu, objdump_only))
-    total_bytes = sum(sizes)
-    report["objdump_only_seconds"] = round(secs, 2)
-    report["disassembly_bytes"] = total_bytes
-    print(f"\n  objdump alone      {secs:7.1f}s   "
-          f"({total_bytes / 1e6:.0f} MB of disassembly)")
-
     # fork, explicitly: the scanner was loaded from a path rather than imported,
     # so a spawned child could not re-import it.  Linux-only, which is what CI
     # and the container are.
@@ -163,45 +197,72 @@ def main(argv=None):
         ctx = multiprocessing.get_context("fork")
     except ValueError:
         ctx = None
+    pool_kw = {"mp_context": ctx} if ctx is not None else {}
+    procs = concurrent.futures.ProcessPoolExecutor
 
-    baseline = None
+    # THREE passes over the same objects, all at full width and all with
+    # processes, so the differences between them are the phases and nothing
+    # else:
+    #
+    #   A  objdump                          the subprocess half
+    #   B  objdump + instructions()         adds the per-line match and sub
+    #   C  objdump + instructions + search  adds the four pattern searches
+    #
+    # B - A is instructions(); C - B is the searches.  Which of those dominates
+    # decides what a fix even looks like -- a cheaper line filter and a cheaper
+    # alternation are unrelated changes -- and the 9.5x gap between the
+    # architectures is not explained by search count alone.
+    t_a, sizes = timed(lambda: run_pool(procs, targets, ncpu, objdump_only, **pool_kw))
+    total_bytes = sum(sizes)
+    report["objdump_only_seconds"] = round(t_a, 2)
+    report["disassembly_bytes"] = total_bytes
+    print(f"\n  A objdump              {t_a:7.1f}s   "
+          f"({total_bytes / 1e6:.0f} MB of disassembly)")
+
+    t_b, kept = timed(lambda: run_pool(procs, targets, ncpu,
+                                       objdump_and_instructions, **pool_kw))
+    report["objdump_instructions_seconds"] = round(t_b, 2)
+    report["instruction_text_bytes"] = sum(kept)
+    print(f"  B + instructions()     {t_b:7.1f}s   "
+          f"({sum(kept) / 1e6:.0f} MB kept as instruction text)")
+
     for jobs in counts:
-        t_thread, r_thread = timed(lambda: run_pool(
-            concurrent.futures.ThreadPoolExecutor, targets, jobs, isa.scan_one))
-        row = {"threads_seconds": round(t_thread, 2)}
-        line = f"  jobs={jobs:<3} threads {t_thread:7.1f}s"
+        t_c, r_proc = timed(lambda: run_pool(procs, targets, jobs,
+                                             isa.scan_one, **pool_kw))
+        row = {"processes_seconds": round(t_c, 2)}
+        line = f"  C + searches           {t_c:7.1f}s   (jobs={jobs})"
 
-        if ctx is not None:
-            t_proc, r_proc = timed(lambda: run_pool(
-                concurrent.futures.ProcessPoolExecutor, targets, jobs,
-                isa.scan_one, mp_context=ctx))
-            row["processes_seconds"] = round(t_proc, 2)
-            row["speedup"] = round(t_thread / t_proc, 2) if t_proc else None
-            line += f"   processes {t_proc:7.1f}s   x{t_thread / t_proc:.2f}"
-
+        if a.compare_executors:
+            t_thread, r_thread = timed(lambda: run_pool(
+                concurrent.futures.ThreadPoolExecutor, targets, jobs,
+                isa.scan_one))
+            row["threads_seconds"] = round(t_thread, 2)
+            row["speedup"] = round(t_thread / t_c, 2) if t_c else None
             # A faster gate that reports something different is not a faster
-            # gate.  This is the check that would have to pass before anyone
-            # changes isa-scan.py itself.
+            # gate.  Settled for the executor swap; kept because it is the shape
+            # any future change to the scanner has to pass.
             same = dict(r_thread) == dict(r_proc)
             row["identical_results"] = same
-            line += "   results identical" if same else "   RESULTS DIFFER"
-
-        if baseline is None:
-            baseline = dict(r_thread)
-        elif dict(r_thread) != baseline:
-            row["identical_results"] = False
-            line += "   (differs from jobs=%d)" % counts[0]
+            line += (f"   threads {t_thread:7.1f}s  x{t_thread / t_c:.2f}"
+                     + ("  results identical" if same else "  RESULTS DIFFER"))
 
         report["runs"][str(jobs)] = row
         print(line)
 
-    # The split the whole exercise is about.
-    best = report["runs"][str(counts[-1])]["threads_seconds"]
-    python_share = best - report["objdump_only_seconds"]
-    report["python_seconds_estimate"] = round(python_share, 2)
-    pct = 100 * python_share / best if best else 0
-    print(f"\n  python share       {python_share:7.1f}s of {best:.1f}s "
-          f"({pct:.0f}%) at jobs={counts[-1]}")
+    # The split this exists to produce.
+    jobs = counts[-1]
+    t_c = report["runs"][str(jobs)]["processes_seconds"]
+    t_instr = t_b - t_a
+    t_search = t_c - t_b
+    report["instructions_seconds"] = round(t_instr, 2)
+    report["searches_seconds"] = round(t_search, 2)
+    report["python_seconds_estimate"] = round(t_c - t_a, 2)
+    print(f"\n  where the python time goes, at jobs={jobs}:")
+    for label, secs in (("objdump      (A)", t_a),
+                        ("instructions (B-A)", t_instr),
+                        ("searches     (C-B)", t_search)):
+        pct = 100 * secs / t_c if t_c else 0
+        print(f"    {label:20}{secs:8.1f}s  {pct:5.1f}%")
 
     if a.json_out:
         with open(a.json_out, "w") as fh:
