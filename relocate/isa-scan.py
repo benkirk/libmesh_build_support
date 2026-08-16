@@ -45,9 +45,27 @@ import sys
 # --- x86-64 microarchitecture levels -----------------------------------------
 # v1 baseline: SSE, SSE2.  v2 adds SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT.
 # v3 adds AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.  v4 adds AVX-512.
+#
+# The x86 patterns are PREFIX-FACTORED, and the factoring must preserve the
+# accepted language EXACTLY.  Python's re tries every top-level branch at every
+# position, so the flat 21-branch X86_V3 cost 58.7 s per GB per pattern -- 84%
+# of the linux-64 scan -- where the aarch64 patterns cost 4.4.  Grouping
+# branches under shared prefixes, with the whole-word mnemonics behind one
+# leading \b, measured 6.4x cheaper on 896 MB of real x86 instruction text
+# with byte-identical match spans.  Equivalence is not taken on faith: every
+# original branch keeps a positive case in X86_BRANCH_CASES, every merge gap
+# carries a negative ('blsm' is the canonical one -- a draft factoring
+# 'bls[imr]' accepted it, and no corpus test could notice because the mnemonic
+# does not exist), and isa-bench.py --compare-patterns diffs any two versions
+# of this file per-file over a real tree.
 X86_V4 = re.compile(
-    r"%zmm|\{%k[0-7]\}|\bvpternlog|\bvpcompress|\bvpexpand|\bvpconflict|"
-    r"\bvgatherpf|\bvscatter|\bvrangep|\bvreducep|\bvfpclass")
+    # %zmm | {%k0..%k7} | v + one of: pternlog pcompress pexpand pconflict
+    # gatherpf scatter rangep reducep fpclass -- the same 11 branches as the
+    # flat form, all prefix-matching (no trailing \b), 'p(...)' collecting the
+    # vp* four and 'r(...)' the vr* two.
+    r"%zmm|\{%k[0-7]\}|"
+    r"\bv(?:p(?:ternlog|compress|expand|conflict)|gatherpf|scatter|"
+    r"r(?:angep|educep)|fpclass)")
 # NOTE: 'tzcnt' is deliberately absent, and it is the interesting case.  It
 # encodes as F3 0F BC, which a pre-BMI CPU decodes as 'rep bsf' -- the REP
 # prefix is ignored and it executes correctly as plain BSF.  The two differ only
@@ -63,12 +81,23 @@ X86_V4 = re.compile(
 # a real signal.  Silent wrong answers deserve a failure at least as much as a
 # crash does.
 X86_V3 = re.compile(
-    r"%ymm|\bvfmadd|\bvfmsub|\bvfnmadd|\bvfnmsub|\bvperm2i128|\bvpbroadcast|"
-    r"\bbzhi\b|\bpdep\b|\bpext\b|\bmulx\b|\brorx\b|\bsarx\b|\bshlx\b|\bshrx\b|"
-    r"\bandn\b|\bblsi\b|\bblsr\b|\bblsmsk\b|\blzcnt\b|\bmovbe\b")
+    # %ymm | vf{madd,msub,nmadd,nmsub} = vf n? m {add,sub} | vperm2i128 |
+    # vpbroadcast (those six prefix-matching, as before) | the fourteen
+    # whole-word mnemonics: bzhi blsi blsr blsmsk pdep pext mulx rorx sarx
+    # shlx shrx andn lzcnt movbe.  The word group keeps ONE leading and ONE
+    # trailing \b; every alternative inside is all word characters, so the
+    # boundaries distribute over the alternation exactly.  'bls(?:[ir]|msk)'
+    # and NOT 'bls[imr]': the latter also accepts 'blsm', which no CPU has.
+    r"%ymm|\bv(?:f(?:n?m(?:add|sub))|perm2i128|pbroadcast)|"
+    r"\b(?:b(?:zhi|ls(?:[ir]|msk))|p(?:dep|ext)|mulx|rorx|s(?:arx|h[lr]x)|"
+    r"andn|lzcnt|movbe)\b")
 X86_V2 = re.compile(
-    r"\bpopcnt\b|\bpcmpgtq\b|\bpblend|\bptest\b|\bround[ps][sd]\b|"
-    r"\bpmovzx|\bpmovsx|\bcrc32\b|\bcmpxchg16b\b")
+    # popcnt pcmpgtq pblend* ptest pmov{z,s}x* group under one leading \bp,
+    # and each alternative keeps its OWN trailing anchor -- popcnt, pcmpgtq
+    # and ptest end at a word boundary exactly as before, blend and mov[sz]x
+    # stay prefixes (pblendw, pblendvb, pmovzxbw, ...).
+    r"\bp(?:opcnt\b|cmpgtq\b|blend|test\b|mov[sz]x)|"
+    r"\bround[ps][sd]\b|\bcrc32\b|\bcmpxchg16b\b")
 
 # --- aarch64 --------------------------------------------------------------
 # armv8-a is the baseline and is universal.  SVE/SVE2 and SME are the real
@@ -229,6 +258,85 @@ SELF_TEST_NEGATIVE = [
 ]
 
 
+# The factored x86 patterns, exercised branch by branch: one positive case per
+# branch of the ORIGINAL flat alternations, and a negative in every gap a
+# too-wide factoring would open -- 'blsm' is the one a draft patch actually
+# opened, via 'bls[imr]', and no corpus could catch it because no compiler
+# emits a mnemonic that does not exist.  These are mnemonic-level cases checked
+# against ONE pattern each; the line-shape regression cases (symbol names,
+# comments) stay in SELF_TEST / SELF_TEST_NEGATIVE above.  A few operands are
+# synthetic so a case exercises exactly one branch -- vperm2i128 really takes
+# %ymm operands, which would satisfy the %ymm branch before the one under test.
+X86_BRANCH_CASES = [
+    ("x86-64-v4", X86_V4,
+     # must match: one per branch
+     ["vaddpd %zmm1,%zmm2,%zmm3",
+      "vpaddd %xmm0,%xmm1,%xmm2{%k3}",
+      "vpternlogd $0x96,%xmm1,%xmm2,%xmm0",
+      "vpcompressd %xmm0,(%rdi)",
+      "vpexpandd (%rsi),%xmm0",
+      "vpconflictd %xmm0,%xmm1",
+      "vgatherpf0dps (%rax)",
+      "vscatterdps %xmm0,(%rax)",
+      "vrangepd $0x2,%xmm1,%xmm2,%xmm0",
+      "vreduceps $0xb,%xmm1,%xmm0",
+      "vfpclasspd $0x30,%xmm0,%k0"],
+     # must not match
+     ["vgatherdpd (%rax,%xmm0,8),%xmm1",  # AVX2 gather: 'gather', not 'gatherpf'
+      "kmovw %k1,%eax",                   # a bare mask register is not a {%k_} mask
+      "vprangepd $0x2,%xmm1,%xmm2,%xmm0", # 'rangep' wrongly grouped under 'vp'
+      "vternlogd $0x96,%xmm1,%xmm2,%xmm0"]),  # 'pternlog' with the p made optional
+    ("x86-64-v3", X86_V3,
+     ["vaddpd %ymm0,%ymm1,%ymm2",
+      "vfmadd213sd %xmm2,%xmm1,%xmm0",
+      "vfmsub132ps %xmm1,%xmm2,%xmm0",
+      "vfnmadd231sd %xmm2,%xmm1,%xmm0",
+      "vfnmsub213ss %xmm2,%xmm1,%xmm0",
+      "vperm2i128 $0x20,(%rax)",
+      "vpbroadcastb %xmm0,%xmm1",
+      "bzhi %eax,%ebx,%ecx",
+      "pdep %eax,%ebx,%ecx",
+      "pext %rax,%rbx,%rcx",
+      "mulx %rax,%rbx,%rcx",
+      "rorx $0x8,%eax,%ebx",
+      "sarx %eax,%ebx,%ecx",
+      "shlx %rax,%rbx,%rcx",
+      "shrx %rcx,%rdx,%rax",
+      "andn %eax,%ebx,%ecx",
+      "blsi %eax,%ebx",
+      "blsr %rax,%rbx",
+      "blsmsk %eax,%ebx",
+      "lzcnt %eax,%ebx",
+      "movbe (%rax),%ebx"],
+     ["blsm %eax,%ebx",                # the trap: 'bls[imr]' accepts it
+      "bls %eax",                      # truncation of the shared prefix itself
+      "vfmul213sd %xmm2,%xmm1,%xmm0",  # vf+m but neither add nor sub
+      "vfnadd132pd %xmm1,%xmm2,%xmm0", # n without the m
+      "sharx %eax,%ebx",               # 's[ah][lr]?x'-style sloppiness
+      "shx %eax",                      # 'sh[lr]?x' with the class made optional
+      "pdext %eax,%ebx",               # 'pd?ext'-style sloppiness
+      "movb $0x1,(%rax)",              # movbe truncated is a baseline instruction
+      "lzcn %eax",
+      "ymm0"]),                        # the register class without the %
+    ("x86-64-v2", X86_V2,
+     ["popcnt %eax,%edx",
+      "pcmpgtq %xmm1,%xmm0",
+      "pblendw $0xf0,%xmm1,%xmm0",
+      "ptest %xmm1,%xmm0",
+      "roundsd $0x9,%xmm1,%xmm0",
+      "roundps $0x8,%xmm1,%xmm0",      # both [ps][sd] classes, both corners
+      "pmovzxbw %xmm1,%xmm0",
+      "pmovsxwd %xmm1,%xmm0",
+      "crc32 (%rdx),%eax",
+      "cmpxchg16b (%rdi)"],
+     ["vpopcntd %xmm0,%xmm1",          # AVX-512 vpopcnt: no boundary before the p
+      "vptestmb %xmm0,%xmm1",          # 'ptest' with its trailing \b dropped
+      "pmovmskb %xmm0,%eax",           # SSE2 baseline: 'pmov' + m, not [sz]
+      "roundpp $0x1,%xmm1,%xmm0",      # second class widened beyond [sd]
+      "cmpxchg8b (%rsi)"]),            # baseline compare-exchange
+]
+
+
 def self_test():
     checks = [(X86_V4, "x86-64-v4"), (X86_V3, "x86-64-v3"), (X86_V2, "x86-64-v2"),
               (ARM_SVE, "armv8-a+sve"), (ARM_82, "armv8.2-a"), (ARM_LSE, "armv8.1-a")]
@@ -250,7 +358,19 @@ def self_test():
         if got is not None:
             failures += 1
         print(f"  {'ok  ' if got is None else 'FAIL'} {line.strip():44} -> {got}")
+
     total = len(SELF_TEST) + len(SELF_TEST_NEGATIVE)
+    print("  -- per-branch: every original alternation branch, every merge gap --")
+    for name, rx, positives, negatives in X86_BRANCH_CASES:
+        for case, want in [(c, True) for c in positives] + \
+                          [(c, False) for c in negatives]:
+            total += 1
+            got = bool(rx.search(case))
+            if got != want:
+                failures += 1
+            tag = "match" if want else "no-match"
+            print(f"  {'ok  ' if got == want else 'FAIL'} {name}  "
+                  f"{tag:8} {case}")
     print(f"self-test: {total - failures}/{total} passed")
     return 1 if failures else 0
 
