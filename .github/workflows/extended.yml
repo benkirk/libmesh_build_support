@@ -135,3 +135,37 @@ jobs:
       base_image: ubuntu:24.04
       verify_bases: 'almalinux:8 ubuntu:24.04'
       experimental: true
+
+  #-----------------------------------------------------------------------------
+  # The customer_demo branch's stack, built for real.
+  #
+  # That branch layers a customer's own two packages onto this one through
+  # SITE_DIRS -- gust-core on libMesh, then gust-app on gust-core, the second in
+  # three languages.  Its own gate (customer-demo.yml) proves the wiring in
+  # seconds against a mock: discovery, graph order, and the C / C++ OpenMP /
+  # Fortran 2003 bindings.  What a mock cannot answer is whether the recipes
+  # actually compile against a real libMesh, and whether the runtimes those
+  # front-ends drag in -- libgomp for the OpenMP build, libgfortran for the
+  # Fortran one -- survive the prune and still resolve through $ORIGIN once the
+  # tarball is unpacked somewhere else.  Only a full build answers that, which
+  # is why this is here and not there.
+  #
+  # source_ref is the unusual part: the packages exist only on customer_demo, by
+  # design, so this is the one job in the repo that builds a ref other than the
+  # one that triggered it.  That branch is kept rebased on main automatically
+  # (see customer-demo.yml), so it is always main plus those packages.
+  #
+  # linux-64 only, and experimental, following the precedent libmesh-git set:
+  # prove a declared-but-unproven config on one architecture first.  Two verify
+  # images rather than five -- the glibc floor and a current distro -- because
+  # what is being tested here is the customer packages, not the distro matrix
+  # that ci.yml already covers on every PR.
+  customer-demo-stack:
+    name: customer_demo stack (linux-64)
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      source_ref: customer_demo
+      site_dirs: customer
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true

@@ -51,6 +51,22 @@ on:
           is also the job that proves both halves of that split are provisioned.
         type: string
         default: tarball
+      site_dirs:
+        description: >
+          Directories searched for customer package recipes, overriding
+          SITE_DIRS in mk/common.mk.  The default matches that file, so the
+          whole matrix is unaffected.  'customer' is what the customer_demo
+          branch's own stack is built with -- see customer/README.md there.
+        type: string
+        default: site
+      source_ref:
+        description: >
+          Git ref to build, instead of the ref that triggered the run.  Empty
+          means "the triggering ref", which is what every job wants except one:
+          extended.yml builds the customer_demo branch, whose packages exist
+          only on that branch by design.
+        type: string
+        default: ''
       glibc_floor:
         type: string
         default: '2.28'
@@ -155,6 +171,8 @@ jobs:
       bases: ${{ steps.bases.outputs.json }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
       - id: bases
         env:
           BASES: ${{ inputs.verify_bases }}
@@ -209,6 +227,8 @@ jobs:
       config: ${{ steps.names.outputs.config }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
 
       # Before anything touches Docker, because it restarts the daemon.
       - name: Free disk space
@@ -298,6 +318,7 @@ jobs:
           docker compose run --rm -T
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
+          -e SITE_DIRS='${{ inputs.site_dirs }}'
           build make print-config
 
       # 'make all' is run in three invocations rather than one.  The stage graph
@@ -375,6 +396,7 @@ jobs:
           -e HDF5_PARALLEL='${{ inputs.hdf5_parallel }}'
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
           -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
+          -e SITE_DIRS='${{ inputs.site_dirs }}'
           build make build
 
       # The one that earns its keep: toolchain plus built stack, before
@@ -435,6 +457,7 @@ jobs:
           -e IGNORE_LOCK='${{ inputs.ignore_lock && '1' || '0' }}'
           -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
           -e SMOKE_RANKS='${{ inputs.smoke_ranks }}'
+          -e SITE_DIRS='${{ inputs.site_dirs }}'
           build make all
 
       # $WORK lives in a named volume, so the logs and the ISA report are not on
@@ -628,6 +651,8 @@ jobs:
       BUILDKIT_PROGRESS: plain
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -727,6 +752,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
 
       # Tolerated rather than required: if every job died before writing a
       # sidecar there is nothing to download, and this job should still render
