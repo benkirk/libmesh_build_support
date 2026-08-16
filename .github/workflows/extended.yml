@@ -25,6 +25,16 @@ on:
     # oversubscribed at :00 and jobs queue for a long time there.
     - cron: '17 6 * * 1'
   workflow_dispatch:
+    inputs:
+      only:
+        description: >
+          Run a single job instead of the whole matrix.  One of: fresh-solve,
+          mkl, hdf5-parallel, libmesh-git, builder-distro, customer-demo-stack.
+          Blank runs all of them, which is what the schedule does.  This exists
+          because each job here is a full ~40-minute stack build, and iterating
+          on one unproven knob should not cost the other seven.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -51,6 +61,9 @@ jobs:
   # lock is committed, x86 reproducibility is a claim about conda-forge rather
   # than about this repository.
   fresh-solve:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'fresh-solve'
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +81,9 @@ jobs:
   # the accidental MKL pull that §S1 warns about was ~560 MB, and this asks for
   # it deliberately, so the tarball line in the job summary is the thing to read.
   mkl:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'mkl'
     name: mkl
     uses: ./.github/workflows/stack.yml
     with:
@@ -85,6 +101,9 @@ jobs:
   # If a closure change breaks relocation it breaks it on both; the middle three
   # tell you nothing extra, and this is a second full build.
   hdf5-parallel:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'hdf5-parallel'
     name: hdf5 parallel
     uses: ./.github/workflows/stack.yml
     with:
@@ -110,6 +129,9 @@ jobs:
   # Both platforms, because the aarch64 conda lock is what provisions the
   # autotools there and a stale lock is the failure mode this is watching for.
   libmesh-git:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'libmesh-git'
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +150,9 @@ jobs:
   # the floor -- and this is the job that finds out whether "should not" is
   # "does not".  A14 is the precedent for not assuming it.
   builder-distro:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'builder-distro'
     name: built on ubuntu:24.04
     uses: ./.github/workflows/stack.yml
     with:
@@ -161,6 +186,9 @@ jobs:
   # what is being tested here is the customer packages, not the distro matrix
   # that ci.yml already covers on every PR.
   customer-demo-stack:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'customer-demo-stack'
     name: customer_demo stack (linux-64)
     uses: ./.github/workflows/stack.yml
     with:
