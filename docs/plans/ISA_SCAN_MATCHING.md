@@ -1,6 +1,40 @@
 # Plan: make the x86 ISA patterns cheap to match
 
-**Status:** planned, not started. Pick this up in a fresh session.
+**Status:** DONE. Landed as the two commits ahead of this one on the same
+branch; measured on the real stack via a `profile_isa_scan` dispatch
+(run 31925100526).
+
+## Outcome, measured where the plan's numbers were measured
+
+| phase | before | after | |
+|---|---:|---:|---:|
+| objdump | 51.9 s | 57.4 s | (runner noise) |
+| `instructions()` | 32.5 s | 35.7 s | (untouched) |
+| **searches** | **454.0 s** | **99.4 s** | **4.6×** |
+| **scan total** | **538.4 s** | **192.4 s** | **2.8×** |
+
+aarch64, untouched by design, stayed put: searches 17.8 s against the
+recorded 17.9, scan 80.8 s against 81.1. The gate reports exactly what it
+reported before, on both platforms: `all 341 objects within ISA baseline
+x86-64-v2` with the same `7 object(s) above baseline but carrying CPUID
+dispatch`, and `all 339 objects within ISA baseline armv8.1-a`.
+
+The realized multiple on the searches is 4.6×, not the projected 7.15× —
+that projection assumed X86_V3's factoring multiple carried uniformly to
+all four passes, and it does not: CPUID is a single branch with nothing to
+factor, and V2/V4 had less to gain. The verification the plan demanded all
+ran: per-branch cases (self-test 21 → 82), 345,618-string brute-force
+equivalence over every single-character mutation of every mnemonic, and
+`isa-bench.py --compare-patterns` per-file diffs — identical on 1003
+system-library objects locally. The one surprise worth recording:
+`\bcrc32\b` never matched the suffixed `crc32b/q` forms objdump emits for
+memory operands, a pre-existing false negative deliberately preserved,
+since changing the accepted language was exactly what this change was not
+allowed to do.
+
+---
+
+The plan as written, kept for the reasoning and the dead ends:
 
 ## Context
 
