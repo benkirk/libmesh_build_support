@@ -94,10 +94,12 @@ ARCHIVE.md  README.md  .dockerignore
 ```
 
 `docker/Dockerfile.builder` is worth calling out as more than convenience: because it
-installs only what a bare host genuinely needs (`curl`, `ca-certificates`, `tar`,
-`bzip2`, a shell — conda supplies the compilers), it is the **executable statement of
-this project's minimal-host claim**. If it ever needs a dev package added, that is a
-regression in the premise, not a fix to the image.
+installs only what a bare host genuinely needs (`curl`, `git`, `ca-certificates`,
+`tar`, `gzip`, `bzip2`, `xz`, a shell — conda supplies the compilers), it is the
+**executable statement of this project's minimal-host claim**. If it ever needs a dev
+package added, that is a regression in the premise, not a fix to the image. The line
+it draws is fetching versus building: transports live here, anything that compiles or
+generates lives in the conda env.
 
 ### Generated build root (step 0's "new, empty directory")
 
