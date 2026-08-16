@@ -242,38 +242,105 @@ def highest(features, levels):
 # indistinguishable from "the regexes never matched anything".  The aarch64
 # patterns are covered the same way and additionally against real compiler
 # output (see the PR).  Run with --self-test.
+#
+# One positive per FACTORED BRANCH: when the patterns were flat alternations
+# this list exercised about three of X86_V3's twenty-one branches, which is fine
+# for "do the regexes fire at all" but blind to a factoring that drops a branch
+# on the floor.  Now every alternative a group spells has a line here that must
+# resolve to it, and the near-miss each factoring must NOT accept has a line in
+# SELF_TEST_NEGATIVE.  The x86 lines pick forms that isolate one branch (e.g.
+# ymm-form AVX-512 so the vp-family branches, not %zmm, decide the verdict).
 SELF_TEST = [
     # (sample line, expected feature or None)
-    ("  401136:\tvaddpd %ymm0,%ymm1,%ymm2", "x86-64-v3"),
-    ("  401140:\tvfmadd213sd %xmm2,%xmm1,%xmm0", "x86-64-v3"),
-    ("  401150:\tbzhi   %eax,%ebx,%ecx", "x86-64-v3"),
-    ("  401160:\tvaddpd %zmm1,%zmm2,%zmm3{%k1}", "x86-64-v4"),
-    ("  401170:\tvpternlogd $0xff,%zmm0,%zmm0,%zmm0", "x86-64-v4"),
-    ("  401180:\tpopcnt %eax,%edx", "x86-64-v2"),
-    ("  401190:\tpcmpgtq %xmm1,%xmm0", "x86-64-v2"),
+    # -- X86_V4, one per branch --
+    ("  401300:\tvmovaps %zmm0,%zmm1", "x86-64-v4"),                    # %zmm
+    ("  401308:\tvpaddq %ymm0,%ymm1,%ymm2{%k1}", "x86-64-v4"),         # {%kN} mask
+    ("  401310:\tvpternlogd $0xff,%ymm0,%ymm0,%ymm0", "x86-64-v4"),    # vpternlog
+    ("  401318:\tvpcompressd %xmm0,%xmm1", "x86-64-v4"),               # vpcompress
+    ("  401320:\tvpexpandd %xmm0,%xmm1", "x86-64-v4"),                 # vpexpand
+    ("  401328:\tvpconflictd %xmm0,%xmm1", "x86-64-v4"),               # vpconflict
+    ("  401330:\tvgatherpf0dps 0x0(%rax)", "x86-64-v4"),               # vgatherpf
+    ("  401338:\tvscatterdps %xmm0,0x0(%rax)", "x86-64-v4"),           # vscatter
+    ("  401340:\tvrangepd $0x0,%xmm0,%xmm1,%xmm2", "x86-64-v4"),       # vrangep
+    ("  401348:\tvreducepd $0x0,%xmm0,%xmm1", "x86-64-v4"),            # vreducep
+    ("  401350:\tvfpclasspd $0x0,%xmm0,%k0", "x86-64-v4"),             # vfpclass
+    # -- X86_V3, one per branch --
+    ("  401200:\tvaddpd %ymm0,%ymm1,%ymm2", "x86-64-v3"),              # %ymm
+    ("  401208:\tvfmadd213sd %xmm2,%xmm1,%xmm0", "x86-64-v3"),         # vfmadd
+    ("  401210:\tvfmsub231ps %xmm2,%xmm1,%xmm0", "x86-64-v3"),         # vfmsub
+    ("  401218:\tvfnmadd213sd %xmm2,%xmm1,%xmm0", "x86-64-v3"),        # vfnmadd
+    ("  401220:\tvfnmsub231ps %xmm2,%xmm1,%xmm0", "x86-64-v3"),        # vfnmsub
+    ("  401228:\tvperm2i128 $0x20,%ymm1,%ymm2,%ymm3", "x86-64-v3"),    # vperm2i128
+    ("  401230:\tvpbroadcastd %xmm0,%ymm1", "x86-64-v3"),             # vpbroadcast
+    ("  401238:\tbzhi   %eax,%ebx,%ecx", "x86-64-v3"),                 # bzhi
+    ("  401240:\tpdep   %edx,%eax,%ecx", "x86-64-v3"),                 # pdep
+    ("  401248:\tpext   %edx,%eax,%ecx", "x86-64-v3"),                 # pext
+    ("  401250:\tmulx   %edx,%eax,%ecx", "x86-64-v3"),                 # mulx
+    ("  401258:\trorx   $0x10,%eax,%ebx", "x86-64-v3"),                # rorx
+    ("  401260:\tsarx   %eax,%ebx,%ecx", "x86-64-v3"),                 # sarx
+    ("  401268:\tshlx   %eax,%ebx,%ecx", "x86-64-v3"),                 # shlx
+    ("  401270:\tshrx   %eax,%ebx,%ecx", "x86-64-v3"),                 # shrx
+    ("  401278:\tandn   %eax,%ebx,%ecx", "x86-64-v3"),                 # andn
+    ("  401280:\tblsi   %eax,%ebx", "x86-64-v3"),                      # blsi
+    ("  401288:\tblsr   %eax,%ebx", "x86-64-v3"),                      # blsr
+    ("  401290:\tblsmsk %eax,%ebx", "x86-64-v3"),                      # blsmsk
+    ("  401298:\tlzcnt  %eax,%ebx", "x86-64-v3"),                      # lzcnt
+    ("  4012a0:\tmovbe  (%rax),%ebx", "x86-64-v3"),                    # movbe
+    # -- X86_V2, one per branch (both round[ps][sd] endpoints) --
+    ("  401100:\tpopcnt %eax,%edx", "x86-64-v2"),                      # popcnt
+    ("  401108:\tpcmpgtq %xmm1,%xmm0", "x86-64-v2"),                   # pcmpgtq
+    ("  401110:\tpblendw $0x0,%xmm1,%xmm0", "x86-64-v2"),              # pblend
+    ("  401118:\tptest  %xmm1,%xmm0", "x86-64-v2"),                    # ptest
+    ("  401120:\troundps $0x0,%xmm1,%xmm0", "x86-64-v2"),              # round[ps][sd]
+    ("  401128:\troundsd $0x0,%xmm1,%xmm0", "x86-64-v2"),              # round[ps][sd]
+    ("  401130:\tpmovzxbw %xmm0,%xmm1", "x86-64-v2"),                  # pmovzx
+    ("  401138:\tpmovsxbd %xmm0,%xmm1", "x86-64-v2"),                  # pmovsx
+    ("  401140:\tcrc32  %eax,%ebx", "x86-64-v2"),                      # crc32 (register form)
+    ("  401148:\tcmpxchg16b (%rax)", "x86-64-v2"),                     # cmpxchg16b
+    # -- non-hazards that must stay unflagged --
     ("  4011a0:\taddsd  %xmm1,%xmm0", None),
     ("  4011b0:\tmovaps %xmm0,(%rax)", None),
     # tzcnt is 'rep bsf' on pre-BMI hardware: executes correctly, not a hazard
     ("  4011b8:\ttzcnt  %rcx,%rdx", None),
+    # -- aarch64 (patterns untouched by the x86 factoring) --
     ("  4011c0:\tld1w   {z0.s},p0/z,[x0]", "armv8-a+sve"),
     ("  4011d0:\tptrue  p0.d", "armv8-a+sve"),
     ("  4011e0:\tsdot   v0.4s,v1.16b,v2.16b", "armv8.2-a"),
     ("  4011f0:\tldadd  w1,w2,[x0]", "armv8.1-a"),
-    ("  401200:\tfadd   d0,d1,d2", None),
+    ("  401210a:\tfadd   d0,d1,d2", None),
 ]
 
 
-# Lines that must NOT match anything.  These are the false positives the first
-# run of this scanner actually produced: symbol names inside <> annotations were
-# being read as instructions, which is how an aarch64 libz.so came back
-# "requiring x86-64-v2".  Every one of these is a real line shape from objdump.
+# Lines that must NOT match anything.  Two kinds:
+#
+#   1. The false positives the first run of this scanner actually produced:
+#      symbol names inside <> annotations read as instructions, which is how an
+#      aarch64 libz.so came back "requiring x86-64-v2".  Real objdump shapes.
+#   2. The near-misses the PREFIX FACTORING must keep rejecting.  Each is a
+#      one-character neighbour of a real mnemonic that sits in the exact gap a
+#      too-wide factoring would open, so the guarantee is a green test, not a
+#      comment.  These are the whole reason the factoring was a plan: 'bls[imr]'
+#      accepts 'blsm', a mnemonic no CPU emits and no corpus contains, so a
+#      corpus test cannot see the widening -- only an explicit non-match can.
 SELF_TEST_NEGATIVE = [
+    # (1) symbol names in annotations are not instructions
     "  400430:\tbl\t400abc <crc32_z@plt>",
     "  400440:\tbl\t400b00 <__popcountdi2@plt>",
     "  400450:\tadrp\tx0, 411000 <ptest_data>",
     "  400460:\tb\t400c00 <sve_helper>",
     "  400470:\tcall   401050 <lzcnt_table>",
     "  400480:\tmov    %rax,%rbx  # ymm not used here",
+    # (2) factoring near-misses that must stay non-matches
+    "  401400:\tblsm   %eax,%ebx",              # bls(i|r|msk), never 'bls[imr]'
+    "  401408:\tblsms  %eax,%ebx",              # 'msk' is all-or-nothing, not 'ms'
+    "  401410:\tsharx  %eax,%ebx,%ecx",         # s(arx|h(lx|rx)) has no 'harx'
+    "  401418:\tpdext  %eax,%ebx,%ecx",         # p(dep|ext), not 'p' + 'd?e' + ...
+    "  401420:\tvfnadd %xmm0,%xmm1",            # vf(m|nm)(add|sub) needs the 'm'
+    "  401428:\tvprangepd $0x0,%xmm0,%xmm1",    # V4 'vrangep' is not 'vp'-prefixed
+    "  401430:\tpmovx  %xmm0,%xmm1",            # mov[sz]x needs the s or z
+    # preserved pre-existing false negative: crc32\b declines the memory-operand
+    # suffixed forms objdump emits (crc32b/crc32q), exactly as before factoring
+    "  401438:\tcrc32b (%rax),%rbx",
 ]
 
 
