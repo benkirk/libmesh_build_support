@@ -284,7 +284,60 @@ improves it.
 
 ## Status
 
-The wiring is verified; the compile is not.
+Built, relocated and run. The whole chain — `petsc → libmesh → gust-core →
+gust-app` — has been through `make all` on `linux-64`, and all four customer
+binaries were then executed from the unpacked tarball on two pristine distros
+with no compiler in them: **`almalinux:8`** (glibc 2.28) and
+**`ubuntu:24.04`** (glibc 2.39). Both green.
+
+The run: `extended.yml`'s `customer-demo-stack` job, which builds *this branch*
+(`source_ref: customer_demo`) with `SITE_DIRS=customer`. `make build` took 26
+minutes, `make all` — relocate, validate, slim, dist, distcheck — another 7,
+and the artifact is 115 MB.
+
+Verbatim from the `almalinux:8` verify job (**glibc 2.28, the floor**),
+unpacking that tarball and running what was inside it:
+
+```
+--- gust-core-selftest on 4 ranks
+    gust-core: rank 0/4 … rank 3/4
+    gust-core: ranks=4 elements=1024 dofs=1089 backend=libMesh 1.7.9 version=0.3.0
+--- gust-hello on 4 ranks
+    gust-hello: gust-core 0.3.0 (compiled against 0.3.0), libMesh 1.7.9
+    gust-hello: solved on 4 rank(s): 256 elements, 289 dofs
+--- gust-hello-f03 on 4 ranks
+    gust-hello-f03: hello from Gust App (Fortran 2003)
+    gust-hello-f03: solved on 4 rank(s): 256 elements, 289
+--- gust-hello-omp on 4 ranks
+    gust-hello-omp: 4 rank(s) x 1 thread(s), 289 dofs, reduction=41616 ok
+--- rebuild skipped: the artifact ships no compiler (by design)
+=== smoke: relocated OK
+```
+
+Three things that log settles, which nothing before it could:
+
+- **`libgomp` and `libgfortran` resolve through `$ORIGIN`.** The OpenMP and
+  Fortran binaries loaded and ran from a relocated tree on a host that has no
+  compiler and never had one. That was the last claim resting on reasoning.
+- **The mock was a faithful contract.** Every number the real stack produced is
+  the one `abi-stub` predicted — 1024/1089 at three refinements, 256/289 at
+  two, `reduction=41616`. The cheap harness was testing the right thing.
+- **`gust_core.C` compiled against a real libMesh first try**, which is not what
+  this file predicted. The libMesh calls needed no correction.
+
+### Still not proven
+
+- **`linux-aarch64`.** The job is `linux-64` only, following the precedent
+  `libmesh-git` set: prove a declared-but-unproven config on one architecture
+  first. Nothing here is x86-specific, but that is an expectation, not a result.
+- **OpenMP threading under the harness.** Note `4 rank(s) x 1 thread(s)` above:
+  the verify container reported one available processor, so
+  `omp_get_max_threads()` was 1 and the parallel region ran single-threaded.
+  `libgomp` genuinely loaded and the reduction is genuinely correct, but the
+  *threading* was exercised by `abi-check.sh` (two threads), not here.
+- **The three other verify distros.** This job runs two — the glibc floor and a
+  current release — rather than the five `ci.yml` uses, because what is under
+  test is the customer packages, not the distro matrix.
 
 **Checked, and re-checked by CI:** the packages are discovered through
 `SITE_DIRS`; the graph orders `petsc → libmesh → gust-core → gust-app`; the
