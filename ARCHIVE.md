@@ -34,4 +34,4 @@ Fully static builds of this stack stopped being practical:
 
 The replacement ships **shared** libraries in a tree that is relocatable via
 `$ORIGIN`-relative RPATHs, and validates that property end to end rather than
-asserting it. See [`docs/RELOCATABLE-STACK-PLAN.md`](docs/RELOCATABLE-STACK-PLAN.md).
+asserting it. See [`docs/DESIGN.md`](docs/DESIGN.md).

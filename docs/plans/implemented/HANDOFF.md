@@ -1,11 +1,14 @@
 # Handoff
 
-Everything you need to pick this up on a Mac. Written after landing **S0**
-(driver scaffold) and **S0b** (container dev loop).
+> **Status: superseded.** The sprint-era handoff, kept as the record of what was
+> measured and when. Its live content moved: the measured tables and the
+> "gotchas already paid for" to [`docs/DESIGN.md`](../../DESIGN.md), the CI
+> notes to [`docs/CI.md`](../../CI.md), the Mac quick start to the
+> [README](../../../README.md). The body below is unchanged.
 
 - Design and rationale: [`RELOCATABLE-STACK-PLAN.md`](RELOCATABLE-STACK-PLAN.md)
-- Extending it: [`EXTENDING.md`](EXTENDING.md)
-- The retired static stack: [`../ARCHIVE.md`](../ARCHIVE.md)
+- Extending it: [`EXTENDING.md`](../../EXTENDING.md)
+- The retired static stack: [`../ARCHIVE.md`](../../../ARCHIVE.md)
 
 ## TL;DR
 

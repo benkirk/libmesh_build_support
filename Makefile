@@ -1,6 +1,6 @@
 # libmesh_build_support -- relocatable shared-library stack.
 #
-# See docs/RELOCATABLE-STACK-PLAN.md for the design.  Quick start:
+# See docs/DESIGN.md for the design.  Quick start:
 #
 #   cp config.mk.example config.mk     # then edit
 #   make conda build test relocate validate dist distcheck

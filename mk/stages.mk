@@ -1,5 +1,5 @@
 # mk/stages.mk -- the stage targets and their ordering.
-# Mirrors the numbered steps in docs/RELOCATABLE-STACK-PLAN.md:
+# Mirrors the numbered steps in docs/DESIGN.md (the pipeline section):
 #
 #   1 conda -> 2 build -> 3 test -> 4 relocate -> validate -> 5 test
 #                      -> 6 slim -> validate -> 7 dist -> distcheck

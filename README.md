@@ -16,7 +16,7 @@ It is also a **template**. Drop your own package recipes into `site/` and they
 join the same build graph; the relocate, prune and validate machinery then
 covers your packages too.
 
-Design and rationale: [`docs/RELOCATABLE-STACK-PLAN.md`](docs/RELOCATABLE-STACK-PLAN.md).
+Design and rationale: [`docs/plans/implemented/RELOCATABLE-STACK-PLAN.md`](docs/plans/implemented/RELOCATABLE-STACK-PLAN.md).
 
 ## Quick start
 
@@ -104,7 +104,7 @@ libMesh also builds from git rather than only from the release tarball
 than a replacement for it: the default ref is `v$(LIBMESH_VERSION)`, so the two
 modes build the same version and are expected to agree.
 
-See [`docs/HANDOFF.md`](docs/HANDOFF.md) for the measured numbers and, more
+See [`docs/plans/implemented/HANDOFF.md`](docs/plans/implemented/HANDOFF.md) for the measured numbers and, more
 usefully, for what is *still* not verified.
 
 ## CI
