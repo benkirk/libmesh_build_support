@@ -1,6 +1,15 @@
 # Plan: git-source installs for libMesh (alongside the release-tarball path)
 
-**Status:** planned, not started. Pick this up in a fresh session.
+**Status: implemented.** `PKG_SOURCE`, `PKG_GIT_URL` and `PKG_GIT_REF` are in
+`mk/common.mk`'s `declare_pkg` and `mk/pkg.mk`'s `PKG_RULE`; `fetch_git` and
+`fetch_src` are in `lib/build_common.sh`; libMesh builds from git with
+`make LIBMESH_SOURCE=git`, measured green from `make conda` through
+`make distcheck`. See `docs/HANDOFF.md` for the numbers.
+
+Kept as the record of the design and why it was cut this way. **What follows is
+the plan as written before the work**, in the future tense, with line numbers
+from the tree as it then was — read it as rationale, not as a description of
+the current code.
 
 ## Context
 
