@@ -7,8 +7,9 @@ Builds a **relocatable, shared-library stack** — PETSc, Trilinos, libMesh and
 their MPI/BLAS/HDF5 closure — that can be tarred up, unpacked anywhere on a
 customer's machine, and run, with no host dependency beyond core glibc. The
 mechanism is `$ORIGIN`-relative RPATHs; the point is that the repo does not
-*claim* relocatability, it proves it: `make distcheck` tars the tree, deletes
-the original, unpacks at a different path depth and runs the tests again.
+*claim* relocatability, it proves it: `make distcheck` tars the tree, moves
+the original out of its path, unpacks at a different depth and runs the tests
+again.
 
 It is also a **template**: drop your own recipes into `site/` and the same
 build, relocate, prune and validate machinery covers them.
@@ -34,8 +35,9 @@ inside and what it was measured at. Three things to know:
 - **No compiler ships.** `mpicc` is there, and `mpicc -show` tells you the flags;
   build with your own compiler (`MPICH_CC=…`), or build inside the template
   before the prune — that is what `site/` is for.
-- **The host's glibc must be at least the floor in the name** (2.28 by
-  default; measured over the tree, not asserted).
+- **The host's glibc must be at least the floor in the name** — the `GLIBC_FLOOR`
+  pin, 2.28 by default; `validate` measures what the tree really needs and fails
+  if that exceeds the pin.
 - **Install somewhere without spaces** if you build against the stack with
   make. The binaries and `.pc` files work from any path — `distcheck` unpacks
   under one with a space — but GNU make's path functions split on it, so
@@ -54,9 +56,11 @@ docker compose run --rm shell      # /src on the toolchain image; inside it:
 VERIFY_IMAGE=almalinux:8 docker compose run --rm --build verify   # back on the host
 ```
 
-`make help` lists every target. On a 4-vCPU CI runner `make all` is ~36 min
-(`linux-64`) / ~30 min (`linux-aarch64`); Apple Silicon is native for arm64 and
-uses Rosetta for `PLATFORM=linux/amd64` (required for `BLAS_PROVIDER=mkl`). Give
+`make help` lists every target. The compose loop defaults to `linux/arm64` and
+`TARGET_PLATFORM=linux-aarch64`; for the x86 column set
+`PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64` in the environment (Rosetta on
+Apple Silicon; required for `BLAS_PROVIDER=mkl`). On a 4-vCPU CI runner
+`make all` is ~36 min (`linux-64`) / ~30 min (`linux-aarch64`). Give
 Docker Desktop ≥ 60 GB disk and ≥ 12 GB memory. Nothing is re-runnable over its
 own output — iterate with `make distclean`. `make image-shell` pulls the image
 CI built for your checkout instead of building one.
@@ -83,7 +87,7 @@ Set in `config.mk` (copy `config.mk.example`) or on the command line.
 |---|---|---|
 | `TARGET_PLATFORM` | `linux-64` | or `linux-aarch64` |
 | `BLAS_PROVIDER` | `openblas` | `mkl` is x86-64 only |
-| `MPI_FAMILY` | `mpich` | `openmpi` is not yet wired into CI |
+| `MPI_FAMILY` | `mpich` | `openmpi` is not supported yet — prerequisites in `docs/CI.md` |
 | `GLIBC_FLOOR` | `2.28` | the conda sysroot pin; the tarball name carries it |
 | `ISA_BASELINE_X86` / `_AARCH64` | `x86-64-v2` / `armv8.1-a` | a cap the compiler wrappers enforce and the ISA scan gates |
 | `PROFILE` | `default` | version set, `profiles/` |

@@ -2,13 +2,14 @@
 
 The workflows in `.github/workflows/`, what each answers, and how to read a run.
 Everything here drives `docker compose` against `docker/`, so a job and the local
-dev loop run the same images and the same commands.
+dev loop run the same images and the same commands. `A<n>` cites the amendments
+in [`plans/implemented/RELOCATABLE-STACK-PLAN.md`](plans/implemented/RELOCATABLE-STACK-PLAN.md).
 
 ## The workflows
 
 | workflow | trigger | what it answers |
 |---|---|---|
-| `checks.yml` | every push and PR | the fast gate: does it parse, lint, order itself, do the ISA regexes still match, does every base image build, do the docs' links resolve — about two minutes |
+| `checks.yml` | pushes to `main`, every PR, on demand | the fast gate: does it parse, lint, order itself, do the ISA regexes still match, does every base image build, do the docs' links resolve — about two minutes |
 | `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | the default configuration on `linux-64` **and** `linux-aarch64`, verified on all five base images; on `main` it also publishes the builder and devel images |
 | `stack.yml` | called, never triggered | the reusable build-and-verify implementation, parameterised |
 | `extended.yml` | Mondays 06:17 UTC, and on demand | the knobs nobody runs daily: fresh conda solve, MKL, parallel HDF5, libMesh from git, a Debian-family builder, the `customer_demo` branch |
@@ -20,15 +21,16 @@ lives there.
 
 ## Build once, verify everywhere
 
-The shape is the one this section always described — **build once, validate the same
-tarball everywhere** — because that is what the artifact's claim actually is. A build
-job publishes a tarball; a fan-out of consume-and-test jobs unpacks that one tarball on
-a pristine, poorer image and runs it. That is S0b's `build`/`verify` service split
+The shape is **build once, validate the same tarball everywhere** — because that
+is what the artifact's claim actually is. A build job publishes a tarball; a
+fan-out of consume-and-test jobs unpacks that one tarball on a pristine, poorer
+image and runs it. That is `docker/compose.yaml`'s `build`/`verify` service split
 scaled out, and it is implemented by *invoking* those services rather than by
-reimplementing them: every job below shells out to `docker compose` against
-`docker/compose.yaml`, so the builder image, the verify image, the volume layout and
-the verify command are the ones a developer exercises locally. There is no second
-description of the pipeline to keep in sync.
+reimplementing them: every job shells out to `docker compose` against that file,
+so the builder image, the verify image, the volume layout and the verify command
+are the ones a developer exercises locally. There is no second description of
+the pipeline to keep in sync — a green local `compose run verify` is supposed to
+mean something about CI.
 
 Four decisions behind that shape:
 
@@ -43,10 +45,11 @@ Four decisions behind that shape:
 - **The fast gate is separate from the expensive one.** Most mistakes here are
   catchable in two minutes without building anything; A1 was that class of
   break, and `make -n all` under `-j8` is what catches it.
-- **`ci.yml` builds from the checked-in lock; `extended.yml` solves from the
-  spec.** A lock can never report that `conda/env/*.yml` has stopped resolving to
-  something that works, so `fresh-solve` ignores it weekly and publishes the lock
-  that solve produced.
+- **`ci.yml` builds from the checked-in lock where one exists; `extended.yml`
+  solves from the spec.** A lock can never report that `conda/env/*.yml` has
+  stopped resolving to something that works, so `fresh-solve` ignores it weekly
+  and publishes the lock that solve produced. Today only `linux-aarch64` has a
+  lock; `linux-64` re-solves on every run (A37).
 
 ## The fast gate: `checks.yml`
 
@@ -85,7 +88,7 @@ SIGINT as "stop this container"; the default TERM would orphan it.
 | name | contents |
 |---|---|
 | `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz` |
-| `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, the conda lock as built, `df.txt` |
+| `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, `lock/` (the checked-in locks, plus the fresh one when `refresh_lock` ran), `df.txt` |
 | `result-build-…`, `result-verify-…-<base>` | one JSON per job, for `summarise` |
 
 **Images.** On `main`, `ci.yml` also pushes two images per configuration to
@@ -95,7 +98,7 @@ of the config tuple and the recipes, computed by `.github/scripts/inputs-sha.sh`
 — the same script `make image-shell` and `docker/pull-shell.sh` use locally, so
 on the commit that built an image `make image-shell` pulls it (`STAGE=builder`
 for the toolchain alone), and a tree CI never built resolves to a tag that is
-not there. Pull requests read; only `main` writes.
+not there. Pull requests read; pushes to `main` and manual dispatches write.
 
 ## Reading the run summary
 
@@ -112,10 +115,11 @@ Each build job writes a block headed `<platform> · <blas> · <mpi>`:
 
 `summarise` then renders one **Stack matrix** table (configuration, result,
 time, tarball, size, packages, floor, ISA), a **Verify** grid — one column per
-base image, each cell ✅/❌ with the distro and glibc the job *actually* ran on,
-parsed back out of the verify log — and, when an `experimental: true` job
-failed, a section saying so. The run stays green; the failure is on the page.
-Before that section existed, an experimental red was invisible (#14).
+base image, each cell ✅/❌ and duration, with a collapsed list underneath of the
+distro and glibc each image *actually* ran, parsed back out of the verify log —
+and, when an `experimental: true` job failed, a section saying so. The run stays
+green; the failure is on the page. Before that section existed an experimental
+red was invisible (PR #14).
 
 ## The second axis: `extended.yml`
 
@@ -125,16 +129,16 @@ Before that section existed, an experimental red was invisible (#14).
 | `mkl` | `linux-64`, `BLAS_PROVIDER=mkl` | x86 only by construction; watch the tarball size |
 | `hdf5-parallel` | `linux-64`, `HDF5_PARALLEL=yes` | the `mpi_*` variant pulls MPI into everything touching HDF5 (A3) |
 | `libmesh-git` | both platforms, `LIBMESH_SOURCE=git` | the git-source path, and the only job needing git in the image *and* autotools in the env |
-| `builder-distro` | `linux-64` on `ubuntu:24.04` | the builder's own distro should be irrelevant; #20 found it lending us `ar` |
-| `customer-demo-stack` | `linux-64`, `source_ref: customer_demo`, `site_dirs: customer` | the site-package template built for real, from the branch that carries it |
+| `builder-distro` | `linux-64` on `ubuntu:24.04` | the builder's own distro should be irrelevant; PR #20 found it lending us `ar` |
+| `customer-demo-stack` | `linux-64`, `source_ref: customer_demo`, `site_dirs: customer` | a customer's own two packages layered on through `SITE_DIRS`, from the branch that carries them — the `EXTENDING.md` extension point built for real |
 
-All but `fresh-solve` are `experimental: true` and verify on two bases
-(`almalinux:8`, `ubuntu:24.04`) rather than five: if a closure change breaks
-relocation it breaks on both, and the middle three add nothing. On dispatch,
-`only=<job>` runs one; a job added here needs its own `only` guard or a named
-dispatch will skip it. Weekly rather than nightly because GitHub disables a
-schedule after 60 days of repository inactivity, and a silent extended matrix
-is a green one.
+All but `fresh-solve` are `experimental: true`; all but `fresh-solve` and `mkl`
+verify on two bases (`almalinux:8`, `ubuntu:24.04`) rather than five — if a
+closure change breaks relocation it breaks on both, and the middle three add
+nothing. On dispatch `only=<job>` runs one; a job added here needs its own
+`only` guard, or it runs on every named dispatch and `only=<it>` selects
+nothing. GitHub disables a schedule after 60 days of repository inactivity, and
+a silent extended matrix is a green one — check that it is still running.
 
 Not wired, deliberately: `MPI_FAMILY=openmpi` (needs an env spec, a meaningful
 `MPI_VERSION`, prune-list entries for its plugins, and a pinned transport in the
@@ -165,16 +169,18 @@ disk at the end.
 
 ## Why the matrix exists
 
-**A34 — a `grep -l` behind `xargs` truncated its own work list, silently and
-non-deterministically. CI found it; repeated local runs did not.** The first CI
-run of the full pipeline failed identically on both platforms with five files
-still naming the build prefix:
+From A34, which is the whole argument in one finding:
 
-Two things worth keeping from this. **A list-building failure is invisible by
-construction**: nothing errors, you simply get less work done, and the eventual
-symptom points at the files rather than at the generator. And it is the argument
-for the CI matrix paying for itself on its first green-ish run — this had
-survived four clean local `make all` cycles.
+> **A34 — a `grep -l` behind `xargs` truncated its own work list, silently and
+> non-deterministically. CI found it; repeated local runs did not.** The first CI
+> run of the full pipeline failed identically on both platforms with five files
+> still naming the build prefix […]
+>
+> Two things worth keeping from this. **A list-building failure is invisible by
+> construction**: nothing errors, you simply get less work done, and the eventual
+> symptom points at the files rather than at the generator. And it is the argument
+> for the CI matrix paying for itself on its first green-ish run — this had
+> survived four clean local `make all` cycles.
 
 The verify fan-out earned its keep on its first run too: `opensuse/leap:15`
 ships no `gzip`, so the tarball could not even be unpacked there, on both
@@ -185,7 +191,7 @@ arrival (A36).
 
 Worth stating so a green matrix is not read as more than it is. The runners are
 4-vCPU single machines, so `SMOKE_RANKS=4` on one node is the ceiling — multi-node MPI
-was already out of scope (§Locked decisions), and CI does not change that. Nothing
+was already out of scope, and CI does not change that. Nothing
 here runs on old hardware; `relocate/isa-scan.py` is the stand-in for the customer's
 2015 Xeon and it is a static check, not a run. And CI verifies distros, not CPUs:
 five base images on two architectures says nothing about the ISA floor that the ISA
@@ -196,6 +202,6 @@ gate does not already say by itself.
 At a61f0d6, `make all` is 2173 s on `linux-64` and 1826 s on `linux-aarch64`
 (4-vCPU runners); `checks` is about two minutes; a verify job about one. The ISA
 scan was once 18 of the first x86 build's 21 minutes; scanning with processes
-(#16) and prefix-factoring the x86 patterns (#19,
+(PR #16) and prefix-factoring the x86 patterns (PR #19,
 [`plans/implemented/ISA_SCAN_MATCHING.md`](plans/implemented/ISA_SCAN_MATCHING.md))
 took it to about three.

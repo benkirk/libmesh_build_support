@@ -3,7 +3,7 @@
 Anything in `site/*/` is discovered automatically and joins the build graph.
 `site/` is gitignored, so you can layer proprietary recipes on top of this repo
 without forking it or carrying a patch. How the pipeline treats what you install
-is in [`DESIGN.md`](DESIGN.md).
+is in [`DESIGN.md`](DESIGN.md), which also explains the `A<n>` citations.
 
 ```sh
 cp -r pkgs/_template site/mysolver
@@ -20,11 +20,11 @@ cp -r examples/site-package site/my-solver
 make build
 ```
 
-It lives under `examples/` rather than `site/` so it can be tracked and
-*exercised*: the full pipeline is run with it in place, through `patchelf`,
-`validate` and `distcheck` like anything else. It also shows two things the
-template does not: a package with **no `PKG_URL`** (it generates its own
-sources), and one that declares `PKG_DEPS`.
+It lives under `examples/` rather than `site/` so it can be tracked; it was
+proven end to end by a clean `make all` with it copied into `site/` (A33), and
+nothing runs it automatically today. It shows two things the template does not:
+a package with **no `PKG_URL`** (it generates its own sources), and one that
+declares `PKG_DEPS`.
 
 ## Getting your package tested
 
@@ -67,10 +67,8 @@ sets.
 then needs `PKG_GIT_URL` and `PKG_GIT_REF` (any tag, branch or SHA).
 `pkgs/libmesh/` is the worked example — it exposes the choice as
 `LIBMESH_SOURCE`, so `make LIBMESH_SOURCE=git build` switches it without editing
-a tracked file. **The stamp does not know which mode it was built in**: the rule
-depends on dependency stamps and `build.sh`, not on the version, URL or source
-mode, so switching modes (or bumping a version) over an existing build is a
-silent no-op. Delete the stamp, or `make clean`, when changing *what* is built.
+a tracked file. **The stamp ignores version, URL and source mode** — delete it,
+or `make clean`, when changing *what* is built (`DESIGN.md`, constraints).
 
 ## `build.sh` contract
 
@@ -89,12 +87,10 @@ and a `BUILD_TMP` scratch directory. Call `list_build_env` right after
 have. `fetch_src` dispatches on `PKG_SOURCE` and leaves the sources at the same
 path either way; `fetch_git` keeps a bare mirror in `SRC_CACHE`.
 
-Where the tools come from decides what your recipe must `require`: **git is in
-the builder image** with `curl` and `tar` — fetching is the host's job;
-**autoconf, automake and libtool are in the conda env** and pruned from the
-artifact — generators belong to the toolchain, where one pin behaves the same on
-every base image. A git-mode recipe runs its own bootstrap; the framework
-fetches, it does not autoreconf for you:
+Where the tools come from decides what your recipe must `require`: git is in the
+builder image with `curl` and `tar`; autoconf, automake and libtool are in the
+conda env, pruned from the artifact (why: `DESIGN.md`). A git-mode recipe runs
+its own bootstrap; the framework fetches, it does not autoreconf for you:
 
 ```sh
 case "${PKG_SOURCE}" in
@@ -116,9 +112,14 @@ Three rules that matter:
    it, and the normalization pass exists so you don't have to fight that.
 3. **Do not set `-march` yourself.** `activate_toolchain` puts the ISA wrappers
    ahead of everything on `PATH`, and they append `-march=$ISA_BASELINE` after
-   whatever your build system passes. Anything you set will simply lose; if your
-   package needs a *higher* baseline, raise `ISA_BASELINE_*` — a decision about
-   the whole artifact, not one package. See `wrappers/README.md`.
+   whatever your build system passes; `-march=native` is refused. Anything you
+   set will simply lose; if your package needs a *higher* baseline, raise
+   `ISA_BASELINE_*` — a decision about the whole artifact, not one package.
+   `relocate/isa-scan.py` then disassembles every shipped object and the final
+   validate fails on anything above the baseline. On x86 an object containing
+   `CPUID` is bucketed as runtime dispatch automatically; anything else that
+   legitimately exceeds the baseline must be added to the `DISPATCH` tuple in
+   `relocate/validate.sh`. Mechanism: `wrappers/README.md`; why: `DESIGN.md`.
 
 Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
 
@@ -131,18 +132,6 @@ Logs land in `$WORK/logs/<name>.log`; on failure the tail is printed.
 package. Use these for site policy — extra validation, signing, publishing —
 rather than editing tracked files.
 
-## Instruction-set baseline
-
-Your package is compiled through a wrapper layer that appends
-`-march=$(ISA_BASELINE)` **last**, so it wins over anything your build system
-sets. Defaults are `x86-64-v2` and `armv8.1-a` (`ISA_BASELINE_X86` /
-`ISA_BASELINE_AARCH64` in `config.mk`); `-march=native` is rejected outright.
-Whatever the wrappers do, `relocate/isa-scan.py` disassembles every shipped
-object and the validator fails on anything above the baseline; libraries that
-dispatch on CPUID at runtime (OpenBLAS, MKL, OpenSSL) get their own bucket. If
-your package does its own runtime dispatch, say so. Why none of this is
-belt-and-braces: `DESIGN.md`, the ISA section.
-
 ## The shipped artifact has no compiler
 
 `conda/prune.list` drops `gcc_impl` and the sysroot — about 530 MB — so the
@@ -153,9 +142,11 @@ uses their own compiler; `mpicc -show` and `MPICH_CC` still serve them.
 
 ## Things that will bite you
 
-- **`dlopen`ed plugins are invisible to `ldd`.** If your package loads modules
-  at runtime, add them to `stack/etc/entrypoints` or `SLIM_PROFILE=runtime` will
-  prune them and the failure will only appear after relocation.
+- **`dlopen`ed plugins are invisible to `ldd`**, which is why pruning is by
+  whole conda package and `slim.sh` removes only fixed directories by name;
+  files a source build installs are never pruned. Keep runtime-loaded modules
+  under the tree, and out of `include/`, `lib/pkgconfig`, `lib/cmake` and
+  `bin/*-config` if `SLIM_PROFILE=runtime` is in use.
 - **Absolute paths in generated text files** (`.pc`, `*Config.cmake`,
   `*-config` scripts) must be rewritten. `relocate/fixup-text.sh` handles the
   common cases; check yours with `grep -r "$BUILD_ROOT" "$STACK"`.

@@ -79,14 +79,15 @@ follows is what each one guarantees.
 - **test** again, from the relocated tree, before anything is deleted.
 - **slim** — file-level trimming (`.la`, docs, man, conda metadata, `strip`),
   *then* prune: `conda/prune.list` packages removed by their `conda-meta` file
-  lists, never by glob. Slim first because `strip` and `patchelf` are themselves
-  on the list (A17). `SLIM_PROFILE=devel` keeps headers, `.pc` and cmake configs
-  — customers extend this tree.
+  lists, never by glob. Slim first because `strip` is itself on the list (A17).
+  `SLIM_PROFILE=devel` keeps headers, `.pc` and cmake configs — customers extend
+  this tree.
 - **validate** again — this is the artifact.
 - **dist** — a reproducible tar, `<name>-<version>-<platform>-<blas>-glibc<floor>.tar.gz`,
   one top-level `stack/`.
-- **distcheck** — the actual proof, and the headline feature: tar → `rm -rf` the
-  original tree → untar at a **different path depth** (e.g. `.../relocated/a/b/c/`) →
+- **distcheck** — the actual proof, and the headline feature: tar → move the
+  original tree out of its path → untar at a **different path depth**
+  (e.g. `.../relocated/a/b/c/`) →
   `validate.sh` → `test/run.sh relocated`. Different depth is deliberate: it is what
   catches a hard-coded `../..` assumption that a same-depth move would hide.
   It unpacks under a path containing a **space** and runs the tree
@@ -107,8 +108,8 @@ Pruning is by whole conda package, by manifest, for the reason given above: a
 dependency closure cannot see `dlopen`ed libraries, and that list — MKL
 dispatch, OpenBLAS threading, Hydra/PMI, libfabric/UCX, hwloc plugins — is
 what file-level pruning would lose, silently, until a customer ran in parallel.
-`SLIM_PROFILE=runtime` does walk a closure, so it must be seeded from
-`stack/etc/entrypoints`.
+`SLIM_PROFILE=runtime` removes headers, `.pc`/cmake files, `*-config` scripts
+and the UCX GPU plugins by name — it walks no closure either.
 
 ## The ISA baseline and the compiler wrappers
 
@@ -116,19 +117,15 @@ Built on one CPU, shipped to older ones — and nothing else in the pipeline
 notices a `-march=native` slip, because the tree runs perfectly on the machine
 that built it (A21).
 
-**`-march` is last-wins on a gcc command line, and `CFLAGS` are injected
-first.** conda-forge's `-march=nocona` therefore cannot override a build system
-that appends its own `-march`. Kokkos autodetecting the host architecture is the
-canonical offender, and it arrives with Trilinos.
-
 ### Decision: a wrapper for what we compile, a gate for everything
 
 Both, because neither is sufficient alone.
 
 The wrappers stand between the build system and the compiler and *append*
-`-march=$ISA_BASELINE` — a cap, not a floor — because appending is the only
-position that wins. Bare `cc`/`gcc` are wrapped too; `mpicc` is not (it invokes
-the already-wrapped compiler); `-march=native` is refused. Defaults are
+`-march=$ISA_BASELINE` — a cap, not a floor — because `-march` is last-wins and
+`CFLAGS` go first, so appending is the only position that wins. Bare `cc`/`gcc`
+are wrapped too; `mpicc` is not (it invokes the already-wrapped compiler);
+`-march=native` is refused. Defaults are
 `x86-64-v2` and `armv8.1-a` (`mk/common.mk`); the aarch64 one is a measured
 correction — first constraint below. `relocate/isa-scan.py` then disassembles
 every shipped object regardless of who built it, self-tests its own patterns so
@@ -179,8 +176,9 @@ Do not re-discover these. Each was paid for once.
   there were two ways to build the same version.
 - **A checked-in lock silently shadows `conda/bootstrap.sh`'s spec list.** That
   is what a lock is for, and it cost two build cycles: editing the specs changes
-  nothing, with no warning, and the package you added is simply not there. Use
-  `make conda IGNORE_LOCK=1`, then `make conda-lock` to refreeze (A24).
+  nothing (`bootstrap.sh` now prints a note saying so), and the package you added
+  is simply not there. Use `make conda IGNORE_LOCK=1` — plus `CONDA_RECREATE=1`
+  over an existing env — then `make conda-lock` to refreeze (A24, A28).
 - **Build tools are pinned to the era of the sources they build**, not to the
   newest: `cmake<4` (CMake 4 hard-errors on Trilinos 14-4-0's
   `cmake_minimum_required(VERSION 2.6)`), `python<3.13` (PETSc 3.20.5's
@@ -197,7 +195,8 @@ Do not re-discover these. Each was paid for once.
 - **Never request `mpich-mpicc`/`mpicxx`/`mpifort`.** Those split packages are
   stale and pin mpich back to **3.2.1 (2017)**. Modern mpich ships the wrappers,
   `mpiexec` and `hydra_pmi_proxy` in the main package.
-- **Pin gcc.** Unpinned solves pick 16.1.0 (A13).
+- **Pin gcc.** Unpinned solves pick 16.1.0. The pin governs the compiler only;
+  the shipped `libstdc++` is conda-forge's newest regardless (A13).
 - **`mpicc` needs `$STACK/bin` on `PATH`** — it invokes
   `x86_64-conda-linux-gnu-cc` by name and fails confusingly without it. The
   shipped `activate.sh` does this.
@@ -232,10 +231,11 @@ Verified on `almalinux:8` (glibc 2.28, the floor), `almalinux:9` (2.34),
 `ubuntu:22.04` (2.35), `opensuse/leap:15` (2.38) and `ubuntu:24.04` (2.39), both
 architectures, every `ci` run — `validate --runtime` clean, then
 `introduction_ex4` in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary
-in an image with no compiler, no python and no binutils.
+with the loader alone — the runtime validate and the smoke run need no compiler,
+python or binutils, and none of the images ships a compiler.
 
-The single most important signal is `distcheck` exiting zero from a
-**different install path than the one the stack was built at**.
+The single most important signal is `distcheck` exiting
+zero from a **different install path than the one the stack was built at**.
 
 **The ISA result is the one to note**, and it now holds on both architectures:
 339/339 within `armv8.1-a` and 341/341 within `x86-64-v2`. That includes
@@ -249,11 +249,14 @@ only evidence that it does. *(Counts as measured 2026-08-15; the table above is 
 conda` through `make distcheck` green: the mirror clone plus recursive
 submodules is 50 s cold and 229 MB cached, `./bootstrap` is 33 s against
 autoconf 2.72 / automake 1.17 / libtool 2.5.4, and the resulting artifact is
-**the same size and the same 336 objects** as the tarball build. That last part
+**the same size and the same 336 objects** as the tarball build (measured
+2026-08-15; the table above is current). That last part
 is the point — the two modes are a cross-check on each other, because the
 default ref is `v$(LIBMESH_VERSION)`.
 
-It also settles A29 from the inside. `contrib/netcdf/v4` really is a symlink to
+It also settles A29 — the 1.7.9 release tarball ships a `netcdf_meta.h` that
+disagrees with git, so an unpatched tarball build cannot write ExodusII — from
+the inside. `contrib/netcdf/v4` really is a symlink to
 `contrib/netcdf/netcdf-c-4.6.2` in git, its `netcdf_meta.h` really does say
 `NC_HAS_NC4 1` / `NC_HAS_HDF5 1`, and `introduction_ex4` writes ExodusII output
 on a git build — which A29 asserted from the outside and nothing could test
