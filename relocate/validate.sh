@@ -316,6 +316,7 @@ for rel, info in rep.get("files", {}).items():
         dispatched.append(entry)
     else:
         over.append(entry)
+print("ISA_SKIPPED=" + json.dumps(rep.get("skipped", "")))
 print("ISA_SCANNED=%d" % scanned)
 print("ISA_OVER=%d" % len(over))
 print("ISA_DISPATCH=%d" % len(dispatched))
@@ -323,7 +324,16 @@ print("ISA_SAMPLE=" + json.dumps(
     "\n".join("          %s: %s" % (e["file"], e["isa"]) for e in over[:12])))
 ISAPY
 )"
-    if [ "${ISA_OVER}" -eq 0 ]; then
+    if [ -n "${ISA_SKIPPED}" ]; then
+      # isa-scan.py returns 0 and writes {"skipped": ...} when it cannot find an
+      # objdump -- deliberate, and right where it lives, since it also runs after
+      # prune has removed binutils.  But the report it leaves has no file list,
+      # so every consumer counting entries sees zero and reads it as a clean
+      # tree.  This branch exists so that a gate which never ran cannot report
+      # "all 0 objects within baseline" and be believed.  Fatal at both stages:
+      # a scan that did not happen is not a verdict that pruning can improve.
+      bad "ISA scan was skipped (${ISA_SKIPPED}); instruction-set floor NOT checked"
+    elif [ "${ISA_OVER}" -eq 0 ]; then
       ok "all ${ISA_SCANNED} objects within ISA baseline ${ISA_BASELINE:-x86-64-v2}"
     else
       # Advisory pre-slim, like the other closure properties: nearly every hit
