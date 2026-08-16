@@ -53,6 +53,7 @@ self-test carries six regression cases built from false positives it really
 produced; this measures it, and nothing here can change what it reports.
 
   relocate/isa-bench.py --root <stack> [--jobs 1,2,4] [--json out.json]
+                        [--compare-patterns <other-isa-scan.py>]
 
 Requires a tree that has not been slimmed or pruned yet -- after 'make all'
 there is no objdump left and the objects are stripped, so the only useful
@@ -74,20 +75,22 @@ import sys
 import time
 
 
-def load_scanner():
+def load_scanner(path=None, name="isa_scan"):
     """Import isa-scan.py, whose hyphen makes it unimportable by name.
 
-    Registered in sys.modules under the name the spec gives it so that
+    Registered in sys.modules under the given name so that
     ProcessPoolExecutor can pickle scan_one by reference: pickle stores
     module+qualname, and the forked child resolves it out of the inherited
-    sys.modules.
+    sys.modules.  --compare-patterns loads a SECOND scanner file the same
+    way, under a distinct name, so both copies coexist and both pickle.
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "isa-scan.py")
-    spec = importlib.util.spec_from_file_location("isa_scan", path)
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "isa-scan.py")
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["isa_scan"] = mod
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -158,6 +161,13 @@ def main(argv=None):
                          "the process pool.  That question is settled -- x2.15 "
                          "and x2.13, identical results -- and re-asking it costs "
                          "a full serialised scan, 21 minutes on linux-64.")
+    ap.add_argument("--compare-patterns", metavar="SCANNER_PY",
+                    help="a second isa-scan.py (e.g. 'git show main:relocate/"
+                         "isa-scan.py > /tmp/old.py') to run over the same tree "
+                         "and diff per-file against this one.  ANY difference is "
+                         "a failure: a faster gate that reports something "
+                         "different is not a faster gate.  Exits non-zero on "
+                         "difference.")
     a = ap.parse_args(argv)
 
     root = os.path.abspath(a.root)
@@ -249,6 +259,43 @@ def main(argv=None):
         report["runs"][str(jobs)] = row
         print(line)
 
+    # Two PATTERN SETS over the same tree, per-file.  This is the gate any
+    # change to the patterns has to pass: the executor comparison above asks
+    # "same results, different plumbing", this asks "same results, different
+    # regexes" -- and per-file, not as a boolean, because the per-file
+    # 'features' dicts are exactly what validate.sh consumes.
+    rc = 0
+    if a.compare_patterns:
+        alt = load_scanner(os.path.abspath(a.compare_patterns),
+                           name="isa_scan_alt")
+        jobs = counts[-1]
+        t_alt, r_alt = timed(lambda: run_pool(procs, targets, jobs,
+                                              alt.scan_one, **pool_kw))
+        this, other = dict(r_proc), dict(r_alt)
+        differing = sorted(rel for rel in this.keys() | other.keys()
+                           if this.get(rel) != other.get(rel))
+        t_this = report["runs"][str(jobs)]["processes_seconds"]
+        report["compare_patterns"] = {
+            "alt_scanner": os.path.abspath(a.compare_patterns),
+            "alt_seconds": round(t_alt, 2),
+            "this_seconds": t_this,
+            "differing_files": differing,
+        }
+        print(f"\n  patterns: this {t_this:7.1f}s   {a.compare_patterns} "
+              f"{t_alt:7.1f}s   x{t_alt / t_this:.2f}" if t_this else "")
+        if differing:
+            rc = 1
+            print(f"  RESULTS DIFFER on {len(differing)} file(s) -- "
+                  f"the pattern change is WRONG, speed is irrelevant:")
+            for rel in differing[:20]:
+                print(f"    {rel}\n      this: {this.get(rel)}\n"
+                      f"      alt : {other.get(rel)}")
+            if len(differing) > 20:
+                print(f"    ... and {len(differing) - 20} more")
+        else:
+            print(f"  per-file results identical across all "
+                  f"{len(this)} objects")
+
     # The split this exists to produce.
     jobs = counts[-1]
     t_c = report["runs"][str(jobs)]["processes_seconds"]
@@ -268,7 +315,7 @@ def main(argv=None):
         with open(a.json_out, "w") as fh:
             json.dump(report, fh, indent=1, sort_keys=True)
         print(f"  -> {a.json_out}")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
