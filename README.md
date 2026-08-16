@@ -85,7 +85,7 @@ versus what is not.
 |---|---|---|
 | `checks.yml` | every push and PR | parses, lints, stage graph, ISA self-test, every base image builds — about two minutes |
 | `ci.yml` | PRs and `main` | `make all` on both target platforms, then the tarball unpacked and run on all five base images |
-| `extended.yml` | weekly | a fresh conda-forge solve instead of the lock, plus the knobs nobody runs: MKL, parallel HDF5, a Debian-family builder |
+| `extended.yml` | weekly | a fresh conda-forge solve instead of the lock, plus the knobs nobody runs: MKL, parallel HDF5, libMesh from git, a Debian-family builder |
 
 The jobs drive `docker compose` against `docker/`, so they run the same images
 and the same commands as the local dev loop — and the verify matrix expands
