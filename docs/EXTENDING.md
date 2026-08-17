@@ -44,7 +44,7 @@ conda packages.
 PKG_NAME    := mysolver
 PKG_VERSION := 2.1.0
 PKG_URL     := https://example.com/mysolver-2.1.0.tar.gz
-PKG_DEPS    := libmesh          # other package names; conda env is implicit
+PKG_DEPS    := libmesh trilinos # other package names, space-separated; conda env is implicit
 PKG_STAGE   := build            # build (default) | optional
 PKG_SOURCE  := tarball          # tarball (default) | git
 
@@ -57,8 +57,9 @@ the same plain `PKG_*` names without clobbering its neighbors. Assign with
 *defined-but-empty*, so a `?=` in any package included after the first silently
 does nothing.
 
-`PKG_DEPS` becomes a stamp prerequisite, so independent packages build
-concurrently under `make -jN`. `PKG_STAGE := optional` still gives the package
+`PKG_DEPS` is a space-separated make list of package directory names — a comma
+would be read as part of the name. Each becomes a stamp prerequisite, so
+independent packages build concurrently under `make -jN`. `PKG_STAGE := optional` still gives the package
 its own target (`make mysolver`) and it is still relocated, validated and packed
 if built — it just isn't built by `make build`. `make print-config` lists both
 sets.
