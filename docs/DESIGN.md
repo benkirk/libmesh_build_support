@@ -162,10 +162,28 @@ Do not re-discover these. Each was paid for once.
 - **Nothing is re-runnable over its own output — including a single package.**
   `make all` rewrites `$STACK` in place (A20), and a *source package* cannot be
   rebuilt over its own previous install either (A30): libMesh installs a bundled
-  Boost subset into `$STACK/include`, and on a second pass `contrib/metaphysicl`
-  finds `boost/version.hpp`, decides Boost is available, and dies on the
-  `boost/chrono.hpp` that subset lacks. Incremental rebuilds are for diagnosis;
-  the build that counts starts from a clean `$STACK`.
+  Boost subset into `$STACK/include`, and on a second pass its configure finds
+  that subset through `-I$STACK/include` and takes it for an external Boost —
+  `pkgs/libmesh/build.sh` now stops there with a message naming A30, where it
+  used to die later inside `contrib/metaphysicl`. Incremental rebuilds are for
+  diagnosis; the build that counts starts from a clean `$STACK`.
+- **A dev package on the build host can steer libMesh's configure.** Rocky 8
+  with `boost-devel` 1.66: `contrib/metaphysicl`'s optional VexCL probe found
+  it in `/usr/include`, added `-I/usr/include`, and died — fatal inside an
+  optional check. Reproduced in CI on `almalinux:8` x86-64: that `-I` puts the
+  host's glibc headers ahead of the sysroot's, and el8's `bits/floatn.h`
+  typedefs `_Float128`, which GCC 14 rejects in C++. Not a Boost problem. On
+  aarch64 the header does not clash and the outcome is worse: libMesh adopts
+  the host Boost and ships `LIBMESH_HAVE_EXTERNAL_BOOST 1` and `-I/usr/include`
+  in `libmesh-config --include` (measured). The conda compiler never sees the
+  host `/usr/include` by itself; only autoconf macros that probe `/usr`, `/opt`
+  and `$BOOST_ROOT` explicitly let it in (Boost; also Eigen, XDR/tirpc, VTK,
+  curl in libMesh's m4). So: `--with-boost=$STACK --with-vexcl=no`, assertions
+  on what configure recorded and on the installed `libmesh-config`/`.pc` files
+  (`pkgs/libmesh/build.sh`, `test/run.sh`), an environment scrub in
+  `activate_toolchain`, and `extended.yml`'s weekly `host-boost` job on a
+  deliberately dirtied `almalinux:8`. Numbers:
+  [`plans/implemented/HOST-BOOST-ISOLATION.md`](plans/implemented/HOST-BOOST-ISOLATION.md).
 - **Changing a package's source mode does not invalidate its stamp.**
   `mk/pkg.mk`'s rule depends on dependency stamps and `build.sh` — not on the
   version, the URL, the source mode or the git ref. So

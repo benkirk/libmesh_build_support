@@ -33,6 +33,15 @@ on:
         description: base image the stack is BUILT on
         type: string
         default: almalinux:9
+      host_extras:
+        description: >
+          NEGATIVE TESTS ONLY.  Space-separated distro dev packages to install
+          into the builder image on top of the minimal set -- a customer's
+          workstation with boost-devel on it -- so that "the host cannot change
+          the artifact" is measured.  Never published; the image tag would not
+          record it (see docker/Dockerfile.builder).
+        type: string
+        default: ''
       blas_provider:
         type: string
         default: openblas
@@ -213,6 +222,7 @@ jobs:
       # declare in its 'environment:' block is passed per-run with 'run -e', so
       # that the compose file stays the local dev loop's file and not CI's.
       BASE_IMAGE: ${{ inputs.base_image }}
+      HOST_EXTRAS: ${{ inputs.host_extras }}
       PLATFORM: ${{ inputs.target_platform == 'linux-aarch64' && 'linux/arm64' || 'linux/amd64' }}
       TARGET_PLATFORM: ${{ inputs.target_platform }}
       BLAS_PROVIDER: ${{ inputs.blas_provider }}
@@ -295,8 +305,14 @@ jobs:
           # artifact keeps the name it has today.
           src=""
           if [ "${LIBMESH_SOURCE}" != tarball ]; then src="-libmesh${LIBMESH_SOURCE}"; fi
-          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}${src}-$(slug "${BASE_IMAGE}")"
-          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · libmesh:${LIBMESH_SOURCE} · on ${BASE_IMAGE}"
+          # A dirtied builder is a different configuration from a clean one on
+          # the same base, and must not share a row, a sidecar or a tarball name.
+          dirt=""; dirtcfg=""
+          if [ -n "${HOST_EXTRAS}" ]; then
+            dirt="+$(slug "${HOST_EXTRAS// /+}")"; dirtcfg=" +${HOST_EXTRAS// / +}"
+          fi
+          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}${src}-$(slug "${BASE_IMAGE}")${dirt}"
+          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · libmesh:${LIBMESH_SOURCE} · on ${BASE_IMAGE}${dirtcfg}"
           {
             echo "ARTIFACT=${artifact}"
             echo "CONFIG=${config}"
@@ -320,6 +336,20 @@ jobs:
           -e LIBMESH_SOURCE='${{ inputs.libmesh_source }}'
           -e SITE_DIRS='${{ inputs.site_dirs }}'
           build make print-config
+
+      # The negative test's positive control: the log must show the host really
+      # is dirty, or a green run proves nothing.  Header-only dev packages leave
+      # nothing the loader would notice, so look for the headers themselves.
+      - name: Host extras present (negative test)
+        if: inputs.host_extras != ''
+        working-directory: docker
+        run: >
+          docker compose run --rm -T build bash -c
+          'echo "host extras: ${{ inputs.host_extras }}";
+           ls -ld /usr/include/boost /usr/include/eigen3 /usr/include/tirpc
+                  /usr/include/curl /usr/include/vtk* 2>/dev/null || true;
+           h=/usr/include/boost/version.hpp;
+           [ -e "$h" ] && grep -m1 "define BOOST_LIB_VERSION" "$h"; true'
 
       # 'make all' is run in three invocations rather than one.  The stage graph
       # makes that exactly equivalent -- each stamp is satisfied or it is not,
@@ -363,8 +393,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      # ...and not when host_extras is set: a dirtied builder must never reach
+      # GHCR under a tag that inputs-sha.sh computed without knowing about it.
       - name: Publish the builder image
-        if: inputs.publish_images
+        if: inputs.publish_images && inputs.host_extras == ''
         continue-on-error: true
         env:
           STAGE: builder
@@ -404,7 +436,7 @@ jobs:
       # consumer pulls this, drops a package into site/, and 'make build' skips
       # everything the stamps already account for.
       - name: Publish the devel image
-        if: inputs.publish_images
+        if: inputs.publish_images && inputs.host_extras == ''
         continue-on-error: true
         env:
           STAGE: devel

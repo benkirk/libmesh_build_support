@@ -46,10 +46,49 @@ list_build_env () {
   done
 }
 
+# assert_no_host_paths LABEL -- read text on stdin (a generated Make fragment,
+# 'libmesh-config' output, a .pc file) and fail if it names a path outside the
+# stack.  "Outside" means under /usr or /opt but not under $STACK or $WORK.
+# $STACK itself may live under /opt -- the compose loop's BUILD_ROOT does -- so
+# the in-tree prefixes are stripped first and whatever /usr/ or /opt/ remains is
+# the host's.  A build system that found a host package and recorded where
+# writes exactly such a path (-I/usr/include/, -L/usr/lib64, -ltirpc via
+# -I/usr/include/tirpc), and that string is what a customer's compile line
+# would then carry.  See pkgs/libmesh/build.sh for the case that earned this.
+assert_no_host_paths () {
+  local label="$1" hits
+  hits="$(sed -e "s|${STACK}||g" -e "s|${WORK}||g" | grep -n -E '/(usr|opt)/' || true)"
+  if [ -n "${hits}" ]; then
+    echo "${label}: names a host path -- something on the build host was found" >&2
+    echo "  and recorded, and would follow the artifact to every customer:" >&2
+    printf '%s\n' "${hits}" | head -10 | sed 's/^/    /' >&2
+    exit 1
+  fi
+  log "no host paths in ${label}"
+}
+
 # Activate the conda toolchain: puts the compilers on PATH and exports
 # CC/CXX/FC and CONDA_BUILD_SYSROOT via the env's activate.d scripts.
 activate_toolchain () {
-  local d="${STACK}/etc/conda/activate.d"
+  local d="${STACK}/etc/conda/activate.d" v
+  # The host's environment does not get a vote.  'make' hands build.sh the
+  # invoking shell's environment (mk/pkg.mk), and on a customer's workstation
+  # that shell may carry a 'module load' or two: BOOST_ROOT, CPATH, LIBRARY_PATH,
+  # a CPPFLAGS pointing at /opt/something.  conda's compilers honor CPATH and
+  # friends like any gcc, and this function used to APPEND the inherited
+  # CPPFLAGS/LDFLAGS to its own -- so a host header could arrive on the compile
+  # line without any package's configure ever asking for it.  Drop them, and say
+  # so, before the conda activate.d scripts set the values that are ours.
+  # LD_LIBRARY_PATH is left alone: it steers the loader for the host's own tools
+  # mid-make, and every stack binary carries an rpath regardless.
+  for v in CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH \
+           LIBRARY_PATH LD_RUN_PATH CPPFLAGS CFLAGS CXXFLAGS FFLAGS FCFLAGS \
+           LDFLAGS PKG_CONFIG_PATH; do
+    if [ -n "${!v:-}" ]; then
+      log "scrubbed inherited ${v}='${!v}' (the host environment does not steer the build)"
+      unset "${v}"
+    fi
+  done
   export CONDA_PREFIX="${STACK}"
   export PATH="${STACK}/bin:${PATH}"
   if [ -d "${d}" ]; then
@@ -60,9 +99,11 @@ activate_toolchain () {
   # Build against the single merged prefix with an absolute rpath; the
   # $ORIGIN conversion is relocate/patchelf.sh's job.  Fighting libtool's
   # $ORIGIN mangling at configure time is not worth it.
+  # ${LDFLAGS:-}/${CPPFLAGS:-} here are what activate.d just set, not the
+  # inherited values -- those were scrubbed above.
   export LDFLAGS="-L${STACK}/lib -Wl,-rpath,${STACK}/lib ${LDFLAGS:-}"
   export CPPFLAGS="-I${STACK}/include ${CPPFLAGS:-}"
-  export PKG_CONFIG_PATH="${STACK}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export PKG_CONFIG_PATH="${STACK}/lib/pkgconfig"
 
   # The ISA wrappers go on LAST, so they sit ahead of $STACK/bin -- including
   # ahead of anything the activate.d scripts just prepended.  That ordering is
