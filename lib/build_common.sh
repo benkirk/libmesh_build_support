@@ -46,6 +46,27 @@ list_build_env () {
   done
 }
 
+# assert_no_host_paths LABEL -- read text on stdin (a generated Make fragment,
+# 'libmesh-config' output, a .pc file) and fail if it names a path outside the
+# stack.  "Outside" means under /usr or /opt but not under $STACK or $WORK.
+# $STACK itself may live under /opt -- the compose loop's BUILD_ROOT does -- so
+# the in-tree prefixes are stripped first and whatever /usr/ or /opt/ remains is
+# the host's.  A build system that found a host package and recorded where
+# writes exactly such a path (-I/usr/include/, -L/usr/lib64, -ltirpc via
+# -I/usr/include/tirpc), and that string is what a customer's compile line
+# would then carry.  See pkgs/libmesh/build.sh for the case that earned this.
+assert_no_host_paths () {
+  local label="$1" hits
+  hits="$(sed -e "s|${STACK}||g" -e "s|${WORK}||g" | grep -n -E '/(usr|opt)/' || true)"
+  if [ -n "${hits}" ]; then
+    echo "${label}: names a host path -- something on the build host was found" >&2
+    echo "  and recorded, and would follow the artifact to every customer:" >&2
+    printf '%s\n' "${hits}" | head -10 | sed 's/^/    /' >&2
+    exit 1
+  fi
+  log "no host paths in ${label}"
+}
+
 # Activate the conda toolchain: puts the compilers on PATH and exports
 # CC/CXX/FC and CONDA_BUILD_SYSROOT via the env's activate.d scripts.
 activate_toolchain () {
