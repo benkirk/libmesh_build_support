@@ -3,125 +3,115 @@
 [![checks](https://github.com/benkirk/libmesh_build_support/actions/workflows/checks.yml/badge.svg)](https://github.com/benkirk/libmesh_build_support/actions/workflows/checks.yml)
 [![ci](https://github.com/benkirk/libmesh_build_support/actions/workflows/ci.yml/badge.svg)](https://github.com/benkirk/libmesh_build_support/actions/workflows/ci.yml)
 
-Builds a **relocatable, shared-library stack** that can be tarred up, unpacked
-anywhere on a customer's machine, and run — with no host dependencies beyond
-core glibc.
+Builds a **relocatable, shared-library stack** — PETSc, Trilinos, libMesh and
+their MPI/BLAS/HDF5 closure — that can be tarred up, unpacked anywhere on a
+customer's machine, and run, with no host dependency beyond core glibc. The
+mechanism is `$ORIGIN`-relative RPATHs; the point is that the repo does not
+*claim* relocatability, it proves it: `make distcheck` tars the tree, moves
+the original out of its path, unpacks at a different depth and runs the tests
+again.
 
-The mechanism is `$ORIGIN`-relative RPATHs applied with `patchelf`. The point of
-this repo is that it doesn't just *claim* relocatability: `make distcheck` tars
-the tree, deletes the original, unpacks it at a different path depth, and runs
-the tests again.
+It is also a **template**: drop your own recipes into `site/` and the same
+build, relocate, prune and validate machinery covers them.
 
-It is also a **template**. Drop your own package recipes into `site/` and they
-join the same build graph; the relocate, prune and validate machinery then
-covers your packages too.
+## Using the artifact
 
-Design and rationale: [`docs/RELOCATABLE-STACK-PLAN.md`](docs/RELOCATABLE-STACK-PLAN.md).
-
-## Quick start
+The tarball is `libmesh-stack-<version>-<platform>-<blas>-glibc<floor>.tar.gz`,
+with one top-level `stack/`. Every `ci` run on `main` publishes it as a
+workflow artifact for 14 days; or build it yourself (next section).
 
 ```sh
-cp config.mk.example config.mk     # edit to taste
-make conda                         # miniforge + the build env
-make build                         # source packages, into the same prefix
-make test                          # smoke example, in place
-make relocate validate             # $ORIGIN rpaths, then the gate
-make dist distcheck                # tar, unpack elsewhere, test again
+tar xzf libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.tar.gz
+. stack/activate.sh                # PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH,
+                                   # PETSC_DIR, LIBMESH_DIR, TRILINOS_DIR, HDF5_ROOT
+libmesh-config --cxx --cppflags --libs     # or: pkg-config --libs libmesh PETSc
+mpiexec -n 4 stack/libexec/introduction_ex4 -d 2 -n 15
 ```
 
-`make help` lists every target. `make print-config` shows resolved settings.
+`activate.sh` finds its own root and never sets `LD_LIBRARY_PATH` — every
+object carries its RPATH. `stack/etc/stack-manifest.json` records what is
+inside and what it was measured at. Three things to know:
 
-## Developing on macOS
+- **No compiler ships.** `mpicc` is there, and `mpicc -show` tells you the flags;
+  build with your own compiler (`MPICH_CC=…`), or build inside the template
+  before the prune — that is what `site/` is for.
+- **The host's glibc must be at least the floor in the name** — the `GLIBC_FLOOR`
+  pin, 2.28 by default; `validate` measures what the tree really needs and fails
+  if that exceeds the pin.
+- **Install somewhere without spaces** if you build against the stack with
+  make. The binaries and `.pc` files work from any path — `distcheck` unpacks
+  under one with a space — but GNU make's path functions split on it, so
+  libMesh's example Makefiles and PETSc's `conf/*` do not.
 
-Don't build on the host — use the container loop:
+## Building the stack
+
+Don't build on the host — use the container loop, which is what CI runs too:
 
 ```sh
 cd docker
-docker compose run --rm shell            # then: make conda, make build, ...
-docker compose run --rm verify           # test the tarball on a pristine image
+docker compose run --rm shell      # /src on the toolchain image; inside it:
+  make print-config                #   check the knobs before a long build
+  make conda build                 #   miniforge + env, then the source packages
+  make all                         #   ... test, relocate, validate, slim, dist, distcheck
+VERIFY_IMAGE=almalinux:8 docker compose run --rm --build verify   # back on the host
 ```
 
-`build` and `verify` deliberately run on *different* images, and the tarball is
-the only thing that crosses between them. On Apple Silicon `PLATFORM=linux/arm64`
-is native and is a real target; `linux/amd64` runs under Rosetta and is required
-for `BLAS_PROVIDER=mkl`.
+`make help` lists every target. The compose loop defaults to `linux/arm64` and
+`TARGET_PLATFORM=linux-aarch64`; for the x86 column set
+`PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64` in the environment (Rosetta on
+Apple Silicon; required for `BLAS_PROVIDER=mkl`). On a 4-vCPU CI runner
+`make all` is ~36 min (`linux-64`) / ~30 min (`linux-aarch64`). Give
+Docker Desktop ≥ 60 GB disk and ≥ 12 GB memory. Nothing is re-runnable over its
+own output — iterate with `make distclean`. `make image-shell` pulls the image
+CI built for your checkout instead of building one.
 
-## Pulling a published image
+## What you get
 
-CI publishes two images per configuration — `builder` (the provisioned
-toolchain) and `devel` (toolchain *plus* the built stack, the one to reach for).
-To pull the image matching your checkout and drop into a shell:
+Measured on `main` at `a61f0d6` (2026-08-16); the `ci` run summary is the live
+source and supersedes this table.
 
-```sh
-make image-shell                        # devel, for the current make config
-STAGE=builder make image-shell          # the toolchain-only image
-docker/pull-shell.sh                    # same, straight from the compose loop
-```
-
-The tag is a *content hash* of the config and recipes, computed by the same
-`inputs-sha.sh` that named the image when CI pushed it — so on the commit that
-built an image this reproduces its reference exactly, and a tree CI never built
-resolves to a tag that simply isn't there. Inside `devel`, drop a recipe into
-`site/` and `make build` compiles only that addition; every tracked package is
-already accounted for.
-
-## How it fits together
-
-| | |
-|---|---|
-| `Makefile`, `mk/` | the driver: knobs, package discovery, stage targets |
-| `profiles/` | version sets (`default`, `stable`, `bleeding`) |
-| `conda/` | miniforge bootstrap, env specs, locks, `prune.list` |
-| `pkgs/` | source package recipes; `pkgs/_template/` to copy |
-| `site/` | **your** recipes — gitignored, auto-discovered |
-| `hooks/` | `pre-`/`post-` stage injection points |
-| `relocate/` | patchelf, path fixup, prune, slim, and the validator |
-| `test/` | smoke harness and the relocation proof |
-| `docker/` | the local dev loop, reused by CI |
-| `.github/workflows/` | the fast gate, and build-once-verify-everywhere |
-
-The conda environment **is** the install prefix — there is no separate staging
-tree and no copy step. Build-only packages (compilers, cmake, sysroot) are
-pruned before packing; the compiler *runtime* stays, because
-`libstdc++.so.6` and `libgcc_s.so.1` must resolve inside the tree.
-
-## Status
-
-The pipeline is green end to end on `linux-64` and `linux-aarch64`: `make all`
-runs conda → relocate → validate → slim → dist → `distcheck`, and the tarball
-it produces has been unpacked and run on distros from glibc 2.28 to 2.39. Every
-pull request re-runs that, on both architectures, across five base images.
-
-The PETSc, Trilinos and libMesh recipes are written, and the tarball is the
-full source stack rather than a placeholder: 107 MB, ~340 ELF objects, every
-one of them within the ISA baseline. It has been unpacked on `almalinux:8`
-(glibc 2.28, the floor) and `ubuntu:24.04` and run there — `introduction_ex4`
-in 1D/2D/3D, serial and on 4 ranks, from the prebuilt binary, in an image with
-no compiler, no python and no binutils.
-
-libMesh also builds from git rather than only from the release tarball
-(`make LIBMESH_SOURCE=git`), which is a cross-check on the tarball path rather
-than a replacement for it: the default ref is `v$(LIBMESH_VERSION)`, so the two
-modes build the same version and are expected to agree.
-
-See [`docs/HANDOFF.md`](docs/HANDOFF.md) for the measured numbers and, more
-usefully, for what is *still* not verified.
-
-## CI
-
-| workflow | when | what |
+| | linux-64 | linux-aarch64 |
 |---|---|---|
-| `checks.yml` | every push and PR | parses, lints, stage graph, ISA self-test, every base image builds — about two minutes |
-| `ci.yml` | PRs and `main` | `make all` on both target platforms, then the tarball unpacked and run on all five base images |
-| `extended.yml` | weekly | a fresh conda-forge solve instead of the lock, plus the knobs nobody runs: MKL, parallel HDF5, libMesh from git, a Debian-family builder |
+| from source | PETSc 3.20.5, Trilinos 14-4-0, libMesh 1.7.9 | same |
+| from conda-forge | mpich 5.0.1, OpenBLAS, HDF5 1.14 (serial); libstdc++ 16.1 runtime, compiled with gcc 14 | same |
+| tarball | 111 MB, 58 packages | 106 MB, 58 packages |
+| ELF objects | 335, all within `x86-64-v2` | 333, all within `armv8.1-a` |
+| glibc floor | 2.28 requested, 2.27 measured | same |
+| runs on | `almalinux:8` (glibc 2.28) through `ubuntu:24.04` (2.39), five images | same |
 
-The jobs drive `docker compose` against `docker/`, so they run the same images
-and the same commands as the local dev loop — and the verify matrix expands
-from `docker/bases.env`, so adding a distro there adds it to CI. Each build
-publishes its tarball as a workflow artifact, which is the most convenient way
-to get one onto real hardware.
+## The knobs worth knowing
 
-## History
+Set in `config.mk` (copy `config.mk.example`) or on the command line.
 
-The previous generation of this repo built an **all-static** stack. That
-approach is retired; see [`ARCHIVE.md`](ARCHIVE.md).
+| knob | default | |
+|---|---|---|
+| `TARGET_PLATFORM` | `linux-64` | or `linux-aarch64` |
+| `BLAS_PROVIDER` | `openblas` | `mkl` is x86-64 only |
+| `MPI_FAMILY` | `mpich` | `openmpi` is not supported yet — prerequisites in `docs/CI.md` |
+| `GLIBC_FLOOR` | `2.28` | the conda sysroot pin; the tarball name carries it |
+| `ISA_BASELINE_X86` / `_AARCH64` | `x86-64-v2` / `armv8.1-a` | a cap the compiler wrappers enforce and the ISA scan gates |
+| `PROFILE` | `default` | version set, `profiles/` |
+| `SHIP_PYTHON` | `no` | keep the python stack in the artifact |
+| `LIBMESH_SOURCE` | `tarball` | `git` clones and bootstraps `LIBMESH_GIT_REF` |
+
+Everything else: `make print-config`.
+
+## Where to go next
+
+- [`docs/DESIGN.md`](docs/DESIGN.md) — how it works and why: the conda env *is*
+  the prefix, the pipeline, RPATH, the ISA baseline, and every constraint that
+  was found by measurement.
+- [`docs/EXTENDING.md`](docs/EXTENDING.md) — adding your own packages to `site/`.
+- [`docs/CI.md`](docs/CI.md) — the workflows, the matrix, and how to read a run.
+- [`ARCHIVE.md`](ARCHIVE.md) — the retired all-static generation.
+- `docs/plans/` holds work not yet done; `docs/plans/implemented/` holds finished
+  plans and the sprint history, kept for their reasoning, not as current docs.
+
+## License
+
+This repository — the recipes, scripts and documentation — is [MIT](LICENSE).
+The tarball it builds carries the licenses of what is inside it: libMesh
+(LGPL), PETSc, Trilinos, OpenBLAS and HDF5 (BSD), MPICH, and the conda-forge
+closure; `stack/etc/stack-manifest.json` records each package's license. Shared
+linking is what keeps the LGPL obligation to relinking, which the tree satisfies
+by construction. `BLAS_PROVIDER=mkl` adds Intel's own license terms.

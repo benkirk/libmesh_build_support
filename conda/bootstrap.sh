@@ -2,7 +2,7 @@
 # Install miniforge into $CONDA_HOME, then create the build env AT $STACK.
 #
 # The env IS the redistributable prefix -- there is no separate install prefix
-# and no harvest/copy step.  See docs/RELOCATABLE-STACK-PLAN.md.
+# and no harvest/copy step.  See docs/DESIGN.md.
 set -euo pipefail
 
 : "${CONDA_HOME:?}" "${STACK:?}" "${TARGET_PLATFORM:?}"

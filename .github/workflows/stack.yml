@@ -87,8 +87,8 @@ on:
       finish_timeout_minutes:
         description: >
           Wall-clock budget for the 'make all' that follows -- relocate,
-          validate, slim, dist, distcheck.  ~25 min measured, of which the ISA
-          scan is 20 on x86-64.
+          validate, slim, dist, distcheck.  Was ~25 min measured, of which
+          the ISA scan was 20 on x86-64; the scan is ~3 min since #16/#19.
         type: number
         default: 90
       publish_images:
@@ -255,7 +255,7 @@ jobs:
           docker info --format 'docker data root {{.DockerRootDir}}'
           docker compose version
 
-          # The job's timeout-minutes is a literal 300 because GitHub
+          # The job's timeout-minutes is a literal 350 because GitHub
           # expressions cannot do arithmetic.  This is the assertion that keeps
           # that literal honest: every step budget, plus the conda step's 45 and
           # a 30-minute tail for diagnostics, image publish and upload, has to

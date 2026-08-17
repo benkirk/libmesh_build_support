@@ -26,7 +26,7 @@ salvaging from them, the empirical version-compatibility notes that lived in
 Fully static builds of this stack stopped being practical:
 
 - glibc's static NSS makes "statically linked" less absolute than it sounds;
-- several PETSc `--download-*` packages no longer honour static requests — the
+- several PETSc `--download-*` packages no longer honor static requests — the
   `3.17*` special case in the old `petsc/build.sh`, which had to disable ML
   outright, was the visible symptom;
 - upstreams increasingly do not test static configurations at all, so breakage
@@ -34,4 +34,4 @@ Fully static builds of this stack stopped being practical:
 
 The replacement ships **shared** libraries in a tree that is relocatable via
 `$ORIGIN`-relative RPATHs, and validates that property end to end rather than
-asserting it. See [`docs/RELOCATABLE-STACK-PLAN.md`](docs/RELOCATABLE-STACK-PLAN.md).
+asserting it. See [`docs/DESIGN.md`](docs/DESIGN.md).

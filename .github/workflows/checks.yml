@@ -54,6 +54,13 @@ jobs:
       - name: Python sources compile
         run: python3 -m py_compile relocate/*.py .github/scripts/*.py
 
+      # The docs cross-reference by path, and paths move.  Every relative link
+      # and every back-ticked *.md path in tracked markdown must name a file
+      # that exists -- assert the artifact, not the intention.  ci.yml skips
+      # docs-only changes, so this is the only gate a docs PR meets.
+      - name: Markdown links resolve
+        run: python3 .github/scripts/check-md-links.py
+
       # The one real test that needs no build.  It exists because the x86
       # instruction patterns cannot be exercised on an aarch64 developer
       # machine: without it, "0 objects above baseline" and "the regexes never

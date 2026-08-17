@@ -4,7 +4,7 @@
 `mk/common.mk`'s `declare_pkg` and `mk/pkg.mk`'s `PKG_RULE`; `fetch_git` and
 `fetch_src` are in `lib/build_common.sh`; libMesh builds from git with
 `make LIBMESH_SOURCE=git`, measured green from `make conda` through
-`make distcheck`. See `docs/HANDOFF.md` for the numbers.
+`make distcheck`. See `docs/DESIGN.md` for the numbers.
 
 Kept as the record of the design and why it was cut this way. **What follows is
 the plan as written before the work**, in the future tense, with line numbers

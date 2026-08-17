@@ -1,18 +1,10 @@
 # Sprint Plan: Relocatable Shared-Library Stack (v1)
 
-> **Status: in progress.** This is the agreed design for the next generation of
-> `libmesh_build_support`, and it remains the source of truth. S0 and S0b are
-> done — the `v0-static-stack` tag is pushed, the autotools tree is gone, and the
-> driver and container loop are in place. Everything from `relocate` onward is
-> still a stub. A review of this plan is recorded in **Amendments** at the end;
-> read it before implementing any section, since several specifics here have been
-> corrected there.
->
-> Two departures from the sprint order below, both deliberate:
-> **S4 lands before S2** — the relocate/validate machinery can be proven against
-> the conda env alone in a six-minute loop, instead of last and on a multi-hour
-> one. And the smoke test arrives **staged** (MPI-only → PETSc → libMesh →
-> `introduction_ex4`) so the pipeline is exercisable from the start.
+> **Status: implemented.** This is the sprint plan as it was written and
+> amended while the work landed, kept as the historical record. The current
+> design is [`docs/DESIGN.md`](../../DESIGN.md); the amendments below (A1–A39,
+> A35 was never issued; A21 is its own section at the end) are what `A<n>`
+> citations elsewhere in the repo point at. Nothing here is edited any more.
 
 ## Context
 

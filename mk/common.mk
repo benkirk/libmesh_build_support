@@ -44,7 +44,7 @@ DIST_VERSION    ?= 0.1.0
 
 #-------------------------------------------------------------------------------
 # Derived paths.  STACK is both the conda env and the install prefix -- there is
-# deliberately no second prefix.  See docs/RELOCATABLE-STACK-PLAN.md.
+# deliberately no second prefix.  See docs/DESIGN.md.
 STACK       := $(BUILD_ROOT)/stack
 CONDA_HOME  := $(BUILD_ROOT)/.conda
 WORK        := $(BUILD_ROOT)/.work

@@ -1,5 +1,5 @@
 # mk/stages.mk -- the stage targets and their ordering.
-# Mirrors the numbered steps in docs/RELOCATABLE-STACK-PLAN.md:
+# Mirrors the numbered steps in docs/DESIGN.md (the pipeline section):
 #
 #   1 conda -> 2 build -> 3 test -> 4 relocate -> validate -> 5 test
 #                      -> 6 slim -> validate -> 7 dist -> distcheck
@@ -200,8 +200,8 @@ conda-lock:
 	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
 
 ## shell: an interactive shell with $(STACK)/bin on PATH
-# Deliberately minimal.  Once S4 lands, $(STACK)/activate.sh is the real entry
-# point and this becomes a thin wrapper around it.
+# Deliberately minimal.  $(STACK)/activate.sh, installed by relocate, is the
+# real entry point; this exists for the stages before it.
 shell: $(STAMPS)/conda.stamp
 	$(SAY) SHELL '$(STACK)'
 	$(Q)env $(PKG_ENV) PATH='$(STACK)/bin':"$$PATH" bash -i

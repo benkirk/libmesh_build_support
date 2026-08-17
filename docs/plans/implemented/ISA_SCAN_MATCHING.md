@@ -1,6 +1,9 @@
 # Plan: make the x86 ISA patterns cheap to match
 
-**Status:** planned, not started. Pick this up in a fresh session.
+**Status: implemented** in #19 — the X86 patterns are prefix-factored in
+`relocate/isa-scan.py`, the self-test grew per-branch cases, and `isa-bench.py`
+gates equivalence. Kept as the record of what was measured and what was ruled
+out; **what follows is the plan as written before the work.**
 
 ## Context
 
