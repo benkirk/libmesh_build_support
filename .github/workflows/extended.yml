@@ -29,10 +29,10 @@ on:
       only:
         description: >
           Run a single job instead of the whole matrix.  One of: fresh-solve,
-          mkl, hdf5-parallel, libmesh-git, builder-distro, customer-demo-stack.
-          Blank runs all of them, which is what the schedule does.  This exists
-          because each job here is a full ~40-minute stack build, and iterating
-          on one unproven knob should not cost the other seven.
+          mkl, hdf5-parallel, libmesh-git, builder-distro, customer-demo-stack,
+          host-boost.  Blank runs all of them, which is what the schedule does.
+          This exists because each job here is a full ~40-minute stack build,
+          and iterating on one unproven knob should not cost the other eight.
         type: string
         default: ''
 
@@ -195,5 +195,41 @@ jobs:
       target_platform: linux-64
       source_ref: customer_demo
       site_dirs: customer
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true
+
+  #-----------------------------------------------------------------------------
+  # A dirty host: the builder with a distro dev package the stack does not want.
+  #
+  # The premise everywhere else is that the build host is irrelevant, and the
+  # clean images make that true by construction -- which is exactly why they
+  # cannot test it.  A Rocky 8 workstation with boost-devel 1.66 in /usr/include
+  # did: libMesh's configure (via contrib/metaphysicl's optional VexCL probe)
+  # found the host Boost, could not use it, and died; had it survived, libMesh
+  # would have built against it and shipped -I/usr/include/ in libmesh-config.
+  # pkgs/libmesh/build.sh now points configure into the stack and asserts on
+  # what it recorded, in the build and in the artifact (test/run.sh).  This job
+  # is the standing measurement that the assertion holds: HOST_EXTRAS installs
+  # the package, stack.yml's "Host extras present" step proves it is there, and
+  # the build must come out identical to a clean one.
+  #
+  # almalinux:8 because it is Rocky 8's twin -- same boost-devel-1.66.0-13.el8
+  # -- and the glibc-2.28 reference target.  Note it had never been a BUILDER
+  # base in CI before this job (ci.yml builds on almalinux:9, builder-distro on
+  # ubuntu:24.04); a red here that is not about Boost is a finding about
+  # almalinux:8 as a builder, and worth having either way.  The package list is
+  # meant to grow, one measured package at a time: eigen3-devel, libtirpc-devel,
+  # libcurl-devel are the next probes libMesh's m4 makes of /usr/include (some
+  # need the CRB or EPEL repository on el8, which is its own finding).
+  host-boost:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'host-boost'
+    name: host with boost-devel (almalinux:8, linux-64)
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      base_image: almalinux:8
+      host_extras: boost-devel
       verify_bases: 'almalinux:8 ubuntu:24.04'
       experimental: true

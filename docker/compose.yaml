@@ -17,12 +17,19 @@ x-common: &common
   # the same Dockerfile twice under two generated names, and so that anything
   # that needs to refer to it -- Dockerfile.publish's FROM, for one -- has a
   # stable name rather than depending on compose's <project>-<service> default.
-  image: libmesh-stack-builder:local
+  # A dirtied builder (HOST_EXTRAS set) gets its own tag, so it can never be
+  # picked up by the next clean 'compose run' -- that would be a quiet version
+  # of the trap bases.env describes for BASE_IMAGE.
+  image: libmesh-stack-builder:${HOST_EXTRAS:+dirty-}local
   build:
     context: ..
     dockerfile: docker/Dockerfile.builder
     args:
       BASE_IMAGE: ${BASE_IMAGE:-almalinux:9}
+      # Negative tests only: distro dev packages to dirty the builder with
+      # (e.g. HOST_EXTRAS=boost-devel).  Empty by default; see the image tag
+      # above.  Use a separate project (-p dirty) so the build root is fresh.
+      HOST_EXTRAS: ${HOST_EXTRAS:-}
   platform: ${PLATFORM:-linux/arm64}
   working_dir: /src
   environment:

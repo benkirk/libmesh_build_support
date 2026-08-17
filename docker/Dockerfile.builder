@@ -27,10 +27,21 @@
 # a no-op.  Probing for the command keeps this file an honest statement of the
 # claim -- and the build log then prints exactly what each base image lacked,
 # which is the number we actually care about.
+#
+# HOST_EXTRAS is the one deliberate exception, and it is for NEGATIVE tests
+# only: distro dev packages a customer's workstation might happen to have
+# (boost-devel was the first), installed so that "the host cannot change the
+# artifact" is measured rather than assumed.  It is empty by default, it is not
+# part of the minimal-host claim, and an image built with it must never be
+# published -- see extended.yml's host-boost job and the guard in stack.yml.
 ARG BASE_IMAGE=almalinux:9
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-c"]
+
+# Declared AFTER FROM on purpose: an ARG before FROM is scoped to the FROM line
+# and invisible to RUN, which would make the negative test pass vacuously.
+ARG HOST_EXTRAS=""
 
 RUN set -eo pipefail; \
     if   command -v dnf     >/dev/null 2>&1; then PM=dnf;    PS=procps-ng; XZ=xz;       GIT=git-core; \
@@ -58,6 +69,17 @@ RUN set -eo pipefail; \
         zypper) zypper --non-interactive install "${need[@]}" && zypper clean -a ;; \
         apt)    apt-get update && apt-get install -y --no-install-recommends "${need[@]}" \
                   && rm -rf /var/lib/apt/lists/* ;; \
+      esac; \
+    fi; \
+    if [ -n "${HOST_EXTRAS}" ]; then \
+      echo "==> host extras (negative test only, NOT part of the minimal-host claim): ${HOST_EXTRAS}"; \
+      case "$PM" in \
+        dnf)    dnf -y install ${HOST_EXTRAS} && dnf clean all \
+                  && rpm -q ${HOST_EXTRAS} ;; \
+        zypper) zypper --non-interactive install ${HOST_EXTRAS} && zypper clean -a \
+                  && rpm -q ${HOST_EXTRAS} ;; \
+        apt)    apt-get update && apt-get install -y --no-install-recommends ${HOST_EXTRAS} \
+                  && rm -rf /var/lib/apt/lists/* && dpkg -s ${HOST_EXTRAS} | grep '^Package:' ;; \
       esac; \
     fi
 
