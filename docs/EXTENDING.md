@@ -160,3 +160,10 @@ uses their own compiler; `mpicc -show` and `MPICH_CC` still serve them.
 - **A source package cannot be rebuilt over its own previous install** — the
   headers it installed change what `configure` finds next time (A30). The build
   that counts starts from a clean `$STACK`.
+- **`configure` scripts wander the host.** Autoconf macros of the
+  `--with-foo=DIR` kind fall back to `/usr`, `/usr/local`, `/opt` and `$FOO_ROOT`
+  when not told where to look, and a dev package on the build host then follows
+  the artifact everywhere. Point them at `$STACK` explicitly (see the Boost
+  flags in `pkgs/libmesh/build.sh`), and pipe whatever your recipe installs as
+  a compile-line contract (`foo-config`, `.pc`) through `assert_no_host_paths`
+  from `lib/build_common.sh`.
