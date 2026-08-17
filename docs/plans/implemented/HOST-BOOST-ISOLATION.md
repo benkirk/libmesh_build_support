@@ -201,4 +201,10 @@ files" = `include/libmesh/libmesh_config.h`, `include/metaphysicl/metaphysicl_co
   as libMesh: PETSc's `--download-ml` compile took `Illegal instruction` in
   `cc1plus` — an emulation limit, not a finding about this change; the CI run
   above is the x86-64 measurement.
-- `host-boost` on the branch itself: see the PR's checks.
+- `host-boost` on the branch itself (run 32070003135, x86-64, `almalinux:8` +
+  `boost-devel`): build 37 min, verify on `almalinux:8` and `ubuntu:24.04`
+  green — the same job that was red pre-fix. `ci.yml` on the branch: both
+  platforms and all five verify images green.
+
+Follow-on (Boost/Eigen/tirpc from the env, a second profile):
+[`../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md`](../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md).
