@@ -106,3 +106,12 @@ Everything else: `make print-config`.
 - [`ARCHIVE.md`](ARCHIVE.md) — the retired all-static generation.
 - `docs/plans/` holds work not yet done; `docs/plans/implemented/` holds finished
   plans and the sprint history, kept for their reasoning, not as current docs.
+
+## License
+
+This repository — the recipes, scripts and documentation — is [MIT](LICENSE).
+The tarball it builds carries the licenses of what is inside it: libMesh
+(LGPL), PETSc, Trilinos, OpenBLAS and HDF5 (BSD), MPICH, and the conda-forge
+closure; `stack/etc/stack-manifest.json` records each package's license. Shared
+linking is what keeps the LGPL obligation to relinking, which the tree satisfies
+by construction. `BLAS_PROVIDER=mkl` adds Intel's own license terms.
