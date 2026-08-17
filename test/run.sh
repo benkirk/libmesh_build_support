@@ -134,6 +134,31 @@ run_ex4 () {
 }
 
 #------------------------------------------------------------------------------
+# libMesh's compile-line contract must point only into this tree.
+#
+# libmesh-config and the .pc files are what a consumer's build receives, and
+# they carry whatever libMesh's configure recorded about optional packages.  A
+# Boost, Eigen or tirpc that configure found on the BUILD host arrives here as
+# -I/usr/include/... -- and follows the artifact to every machine it is
+# unpacked on.  That happened (pkgs/libmesh/build.sh has the story); the recipe
+# now asserts against it at build time, and this is the same assertion made
+# from the outside, on the installed tree, wherever it now lives.  Nothing to
+# check under SLIM_PROFILE=runtime, which ships neither file.
+#
+# $STACK is stripped before looking, because the tree itself may live under
+# /opt (the compose loop's does).  What remains must contain no /usr/ or /opt/.
+check_libmesh_config_paths () {
+  local lmc="${LIBMESH_DIR}/bin/libmesh-config" hits
+  [ -x "${lmc}" ] || { echo "--- libmesh-config check skipped: not shipped in this tree"; return 0; }
+  echo "--- libmesh-config: no host paths in the compile-line contract"
+  hits="$( { METHOD=opt "${lmc}" --cppflags --cxxflags --include --ldflags --libs
+             cat "${LIBMESH_DIR}"/lib/pkgconfig/libmesh*.pc 2>/dev/null
+           } | sed "s|${STACK}||g" | grep -n -E '/(usr|opt)/' || true )"
+  [ -z "${hits}" ] || { echo "${hits}" | head -10 | sed 's/^/    /'
+                        fail "libmesh-config or a libmesh .pc file names a path outside the tree"; }
+}
+
+#------------------------------------------------------------------------------
 # Extra executables from libexec/, run serially and under mpiexec.
 #
 # The assertion is deliberately weak -- exit 0, and something on stdout -- because
@@ -166,6 +191,7 @@ fi
 case "${MODE}" in
   inplace)
     [ -f "${SMOKE_DIR}/Makefile" ] || fail "test/smoke/ has no Makefile"
+    check_libmesh_config_paths
     make -C "${SMOKE_DIR}" all
     run_serial
     run_parallel
@@ -178,6 +204,7 @@ case "${MODE}" in
   relocated)
     # The prebuilt binary, first and unconditionally.
     [ -x "${SMOKE_BIN}" ] || fail "no prebuilt ${SMOKE_BIN} in the unpacked tree"
+    check_libmesh_config_paths
     run_serial
     run_parallel
     run_ex4 serial
