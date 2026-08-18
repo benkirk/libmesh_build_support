@@ -34,6 +34,12 @@ CFLAGS   ?= -O2 -g -Wall
 # 'ldd libpetsc.so' reports zero unresolved libraries.  The library is fine;
 # the linker simply was not told where to look.  -rpath-link is link-time only
 # and leaves nothing in the binary, so it cannot affect relocation.
+#
+# A package build gets this for free and does not know it: conda's
+# activate-gcc_<platform>.sh puts -Wl,-rpath-link,$$CONDA_PREFIX/lib on LDFLAGS,
+# and activate_toolchain sources it.  This Makefile is not a package build --
+# test/run.sh invokes it with plain env -- so it is on its own, exactly like a
+# customer building against the unpacked tarball.
 LDFLAGS  += -L$(STACK)/lib -Wl,-rpath,$(STACK)/lib -Wl,-rpath-link,$(STACK)/lib
 
 # Feature detection, so the example can grow as packages land without the
