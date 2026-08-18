@@ -9,9 +9,15 @@
 # Measured on linux-aarch64 before the bump (see
 # docs/plans/OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md):
 #
-#   PETSc 3.23.7    builds with the recipe's v0 option set unchanged --
-#                   --download-spooles/ml/suitesparse/superlu/scalapack/hypre,
-#                   --with-x=0, conda's OpenBLAS.  'make petsc' exit 0.
+#   PETSc 3.23.7    needed ONE addition to the recipe's v0 option set, and the
+#                   first reading of this measurement was wrong: the run was
+#                   reported green when only its wrapper had exited 0.  PETSc
+#                   3.23 downloads a SuiteSparse whose CHOLMOD builds demo
+#                   programs under BUILD_TESTING, and linking one of them fails
+#                   for want of an -rpath-link.  pkgs/petsc/build.sh now passes
+#                   --download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF,
+#                   which is a no-op for the older SuiteSparse that 3.20.5
+#                   downloads.  See that file for the error and the reasoning.
 #   Trilinos 16-1-0 builds with the recipe unchanged, INCLUDING
 #                   -DTrilinos_ENABLE_Kokkos=OFF.  profiles/README.md predicted
 #                   that flag would not survive a version bump; it did.  Sacado's
