@@ -52,7 +52,21 @@ int main(int argc, char ** argv)
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
   // Every rank reports, so a run that silently serialized fails the harness.
+  //
+  // fflush immediately, and barrier before anything else prints.  Both are
+  // load-bearing and smoke.c does the same: stdout to a pipe is BLOCK-buffered,
+  // so without the flush a partial buffer is written at an arbitrary point and
+  // two ranks interleave mid-line --
+  //
+  //     trilinos: kokkos not compiled in (...)trilinos: rank 1/4
+  //
+  // which is not a line any 'grep -x' will match.  A flushed line shorter than
+  // PIPE_BUF is written atomically, and the barrier keeps the per-rank lines
+  // ahead of the rank-0 detail below.  Measured: this raced green on two
+  // platforms and failed on the third.
   std::printf("trilinos: rank %d/%d\n", rank, size);
+  std::fflush(stdout);
+  MPI_Barrier(MPI_COMM_WORLD);
 
 #ifdef SMOKE_HAVE_KOKKOS
   Kokkos::initialize(argc, argv);
@@ -87,8 +101,11 @@ int main(int argc, char ** argv)
           "Kokkos parallel_reduce produced the wrong sum");
 
     if (rank == 0)
-      std::printf("trilinos: kokkos backend=%s concurrency=%d\n",
-                  host.c_str(), conc);
+      {
+        std::printf("trilinos: kokkos backend=%s concurrency=%d\n",
+                    host.c_str(), conc);
+        std::fflush(stdout);
+      }
   }
   Kokkos::finalize();
 #else
@@ -98,7 +115,10 @@ int main(int argc, char ** argv)
   // gate.  A profile that loses Kokkos unexpectedly should be visible in the
   // log rather than inferred from the absence of a line.
   if (rank == 0)
-    std::printf("trilinos: kokkos not compiled in (profile ships Trilinos without it)\n");
+    {
+      std::printf("trilinos: kokkos not compiled in (profile ships Trilinos without it)\n");
+      std::fflush(stdout);
+    }
 #endif
 
   // Teuchos: a ParameterList round-trip, including the sublist path, which is
@@ -115,7 +135,7 @@ int main(int argc, char ** argv)
           "Teuchos ParameterList lost a sublist entry");
 
     if (rank == 0)
-      std::printf("trilinos: teuchos ok\n");
+      { std::printf("trilinos: teuchos ok\n"); std::fflush(stdout); }
   }
 
   // Epetra: a distributed vector over the real communicator, with a norm whose
@@ -135,12 +155,16 @@ int main(int argc, char ** argv)
     check(norm1 == 2.0 * n_global, "Epetra_Vector::Norm1 is not the global sum");
 
     if (rank == 0)
-      std::printf("trilinos: epetra norm1=%g\n", norm1);
+      { std::printf("trilinos: epetra norm1=%g\n", norm1); std::fflush(stdout); }
   }
 
-  // Rank 0, last -- same contract as smoke.c.
+  // Rank 0, last -- same contract as smoke.c, barrier included.
+  MPI_Barrier(MPI_COMM_WORLD);
   if (rank == 0)
-    std::printf("trilinos: ranks=%d\n", size);
+    {
+      std::printf("trilinos: ranks=%d\n", size);
+      std::fflush(stdout);
+    }
 
   int total = 0;
   MPI_Allreduce(&failures, &total, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
