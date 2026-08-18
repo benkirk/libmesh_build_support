@@ -30,6 +30,8 @@ x-common: &common
       # (e.g. HOST_EXTRAS=boost-devel).  Empty by default; see the image tag
       # above.  Use a separate project (-p dirty) so the build root is fresh.
       HOST_EXTRAS: ${HOST_EXTRAS:-}
+      # Repositories needed to reach them: 'epel-release powertools' on el8.
+      HOST_REPOS: ${HOST_REPOS:-}
   platform: ${PLATFORM:-linux/arm64}
   working_dir: /src
   environment:
