@@ -30,6 +30,8 @@ x-common: &common
       # (e.g. HOST_EXTRAS=boost-devel).  Empty by default; see the image tag
       # above.  Use a separate project (-p dirty) so the build root is fresh.
       HOST_EXTRAS: ${HOST_EXTRAS:-}
+      # Repositories needed to reach them: 'epel-release powertools' on el8.
+      HOST_REPOS: ${HOST_REPOS:-}
   platform: ${PLATFORM:-linux/arm64}
   working_dir: /src
   environment:
@@ -42,6 +44,10 @@ x-common: &common
     CONDA_PKGS_DIRS: /cache/conda-pkgs
     SRC_CACHE: /cache/src
     DIST_DIR: /src/dist
+    # Which version set gets built.  Not a knob the local loop usually touches,
+    # but it has to be here for the same reason the others are: CI sets it in
+    # the environment and this file is the one that carries it in.
+    PROFILE: ${PROFILE:-default}
     TARGET_PLATFORM: ${TARGET_PLATFORM:-linux-aarch64}
     BLAS_PROVIDER: ${BLAS_PROVIDER:-openblas}
     MPI_FAMILY: ${MPI_FAMILY:-mpich}

@@ -198,6 +198,58 @@ else
   # PKG_SOURCE=git recipes both find it on PATH either way.
   specs+=( zlib )
 
+  #-----------------------------------------------------------------------------
+  # libMesh's optional packages.
+  #
+  # Unlike everything above, these are not build tools and they are not pruned:
+  # they ARE the feature set libMesh ships with, and the reason they live here is
+  # that libMesh's configure will otherwise go looking for them on the host.  Its
+  # m4 walks /usr/include, /usr/local and friends for every one of these, records
+  # whatever it finds in libmesh_optional_INCLUDES, and that text becomes the
+  # -I on a customer's compile line (see pkgs/libmesh/build.sh).  Putting them in
+  # the env is what makes "--with-<pkg>=$STACK" have something to find, so the
+  # answer is in the stack rather than on the machine that happened to build it.
+  #
+  #  - libboost-headers, not 'libboost': libMesh and its contrib/metaphysicl use
+  #    header-only Boost.  It replaces libMesh's own bundled subset (contrib/boost,
+  #    Boost 1.61), which is a fraction of the library and which libMesh 'devel'
+  #    has already deleted -- so this is also what keeps a git-source build
+  #    configured the same way as a tarball one.
+  #  - eigen is PINNED to 3.4: conda-forge's newest is Eigen 5, which satisfies
+  #    libMesh's ">= 3.1.2" version test and is not a version either supported
+  #    libMesh release has been built against.  Its headers land in
+  #    include/eigen3, NOT include/ -- see the --with-eigen-include flag.
+  #  - libtirpc supplies rpc/xdr.h, which glibc removed in 2.32 and which the
+  #    2.28 sysroot does not usably provide.  Without it XDR binary I/O is simply
+  #    off, and libMesh 1.7's configure falls back to a hard-coded
+  #    -I/usr/include/tirpc.
+  #  - xorg-libxt is a BUILD-time header dependency of contrib/tecplot/tecio:
+  #    its MASTER.h turns -DLINUX into MOTIF and then includes <X11/Intrinsic.h>
+  #    in every translation unit, and libMesh's tecio.m4 quietly disables the
+  #    whole feature when that header is missing -- which is why --enable-tecio
+  #    has been in the recipe since v0 and has never actually been on.  Nothing
+  #    links libXt; see conda/prune.list.
+  #  - xorg-xorgproto is NOT redundant with it, and finding that out cost a
+  #    build: xorg-libxt brings xorg-libx11, which installs X11/Xlib.h, and
+  #    Xlib.h's first include is <X11/X.h> -- a PROTOCOL header, which
+  #    conda-forge ships in xorg-xorgproto and depends on only at build time.
+  #    So the env had Intrinsic.h and Xlib.h and still could not compile a file
+  #    that included either, and tecio.m4 read that as "no X11" exactly as it
+  #    does on a machine with no X at all.
+  #  - glpk is small (it brings only gmp) and is probed by default, so taking it
+  #    from the env is the same decision as the rest: the alternative is not "no
+  #    dependency" but "whatever the build host had".
+  #
+  # NOT here, deliberately: nlopt.  Every conda-forge nlopt build ever published
+  # carries the Python bindings and depends on numpy plus a python_abi -- there
+  # is no libnlopt and no python-free variant (checked across the whole file
+  # list, 2.11.0 and back to the py27 builds).  That would put numpy in the
+  # artifact and a python extension module linking libpython into a tree whose
+  # python conda/prune.list removes when SHIP_PYTHON=no, which validate.sh would
+  # then fail on an unresolved libpython.  pkgs/libmesh/build.sh passes
+  # --disable-nlopt instead: that closes the /usr probe, which was the point.
+  specs+=( libboost-headers "eigen=3.4.*" libtirpc xorg-libxt xorg-xorgproto glpk )
+
   "${CONDA}" create -y -p "${STACK}" "${specs[@]}"
 fi
 

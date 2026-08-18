@@ -42,6 +42,24 @@ on:
           record it (see docker/Dockerfile.builder).
         type: string
         default: ''
+      host_repos:
+        description: >
+          NEGATIVE TESTS ONLY.  Repositories to reach `host_extras` with, since
+          not every probe libMesh makes is satisfiable from a stock base image:
+          eigen3-devel and glpk-devel are in EPEL, libXt-devel and cppunit-devel
+          in PowerTools/CRB.  An entry ending in '-release' is installed, any
+          other is passed as --enablerepo.  Never published, same as host_extras.
+        type: string
+        default: ''
+      profile:
+        description: >
+          Version set to build -- profiles/<name>.mk, which pins the versions of
+          the source-built packages.  'default' is PETSc 3.20.5 / libMesh 1.7.9 /
+          Trilinos 14-4-0; 'bleeding' is the newer pairing.  It changes what gets
+          compiled but not what conda resolves, so it is part of SHA_BUILD and
+          deliberately not part of SHA_CONDA.
+        type: string
+        default: default
       blas_provider:
         type: string
         default: openblas
@@ -223,8 +241,10 @@ jobs:
       # that the compose file stays the local dev loop's file and not CI's.
       BASE_IMAGE: ${{ inputs.base_image }}
       HOST_EXTRAS: ${{ inputs.host_extras }}
+      HOST_REPOS: ${{ inputs.host_repos }}
       PLATFORM: ${{ inputs.target_platform == 'linux-aarch64' && 'linux/arm64' || 'linux/amd64' }}
       TARGET_PLATFORM: ${{ inputs.target_platform }}
+      PROFILE: ${{ inputs.profile }}
       BLAS_PROVIDER: ${{ inputs.blas_provider }}
       MPI_FAMILY: ${{ inputs.mpi_family }}
       GLIBC_FLOOR: ${{ inputs.glibc_floor }}
@@ -311,8 +331,14 @@ jobs:
           if [ -n "${HOST_EXTRAS}" ]; then
             dirt="+$(slug "${HOST_EXTRAS// /+}")"; dirtcfg=" +${HOST_EXTRAS// / +}"
           fi
-          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}${src}-$(slug "${BASE_IMAGE}")${dirt}"
-          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · libmesh:${LIBMESH_SOURCE} · on ${BASE_IMAGE}${dirtcfg}"
+          # Same rule as the source mode above: only a NON-default profile is in
+          # the name, so every artifact published before profiles were built
+          # keeps the name it has.  The CONFIG line always names it, though --
+          # that one is read by a human deciding what a row means.
+          prof=""
+          if [ "${PROFILE}" != default ]; then prof="-${PROFILE}"; fi
+          artifact="stack-${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-hdf5${HDF5_PARALLEL}${prof}${src}-$(slug "${BASE_IMAGE}")${dirt}"
+          config="${TARGET_PLATFORM} · ${BLAS_PROVIDER} · ${MPI_FAMILY} · hdf5${HDF5_PARALLEL} · ${PROFILE} · libmesh:${LIBMESH_SOURCE} · on ${BASE_IMAGE}${dirtcfg}"
           {
             echo "ARTIFACT=${artifact}"
             echo "CONFIG=${config}"
@@ -346,8 +372,12 @@ jobs:
         run: >
           docker compose run --rm -T build bash -c
           'echo "host extras: ${{ inputs.host_extras }}";
+           echo "host repos:  ${{ inputs.host_repos }}";
            ls -ld /usr/include/boost /usr/include/eigen3 /usr/include/tirpc
-                  /usr/include/curl /usr/include/vtk* 2>/dev/null || true;
+                  /usr/include/X11 /usr/include/glpk.h /usr/include/cppunit
+                  /usr/include/nlopt.h /usr/include/curl /usr/include/vtk*
+                  2>/dev/null || true;
+           command -v cppunit-config || true;
            h=/usr/include/boost/version.hpp;
            [ -e "$h" ] && grep -m1 "define BOOST_LIB_VERSION" "$h"; true'
 
@@ -396,7 +426,7 @@ jobs:
       # ...and not when host_extras is set: a dirtied builder must never reach
       # GHCR under a tag that inputs-sha.sh computed without knowing about it.
       - name: Publish the builder image
-        if: inputs.publish_images && inputs.host_extras == ''
+        if: inputs.publish_images && inputs.host_extras == '' && inputs.host_repos == ''
         continue-on-error: true
         env:
           STAGE: builder
@@ -436,14 +466,18 @@ jobs:
       # consumer pulls this, drops a package into site/, and 'make build' skips
       # everything the stamps already account for.
       - name: Publish the devel image
-        if: inputs.publish_images && inputs.host_extras == ''
+        if: inputs.publish_images && inputs.host_extras == '' && inputs.host_repos == ''
         continue-on-error: true
         env:
           STAGE: devel
           CONFIG: ${{ env.CONFIG }}
           GIT_SHA: ${{ github.sha }}
           INPUTS_SHA: ${{ env.SHA_BUILD }}
-          TAG: ghcr.io/${{ github.repository }}/devel:${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}-${{ env.SHA_BUILD }}
+          # The profile is in the devel tag when it is not the default, matching
+          # docker/pull-shell.sh so 'make image-shell' names the same ref.  The
+          # builder image above needs no such suffix: SHA_CONDA does not depend
+          # on the profile, because the toolchain does not.
+          TAG: ghcr.io/${{ github.repository }}/devel:${{ inputs.target_platform }}-${{ inputs.blas_provider }}-${{ inputs.mpi_family }}${{ inputs.profile != 'default' && format('-{0}', inputs.profile) || '' }}-${{ env.SHA_BUILD }}
         run: bash .github/scripts/publish-stage-image.sh
 
       # Here and nowhere else.  'make all' runs relocate (which strips), slim

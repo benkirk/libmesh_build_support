@@ -379,6 +379,18 @@ man = {
     "build_date": os.environ.get("SOURCE_DATE_EPOCH") or sh("date", "-u", "+%Y-%m-%dT%H:%M:%SZ"),
     "git_sha": sh("git", "-C", os.environ.get("TOPDIR", "."), "rev-parse", "HEAD"),
     "target_platform": os.environ.get("TARGET_PLATFORM"),
+    # Which version set this is.  The conda side of the manifest is complete
+    # without it, and the source side was previously not described at all -- a
+    # tarball could not say which PETSc it carried without being unpacked.
+    "profile": os.environ.get("PROFILE"),
+    "source_packages": {
+        k: v for k, v in (
+            ("petsc", os.environ.get("PETSC_VERSION")),
+            ("libmesh", os.environ.get("LIBMESH_VERSION")),
+            ("trilinos", os.environ.get("TRILINOS_VERSION")),
+        ) if v
+    },
+    "trilinos_kokkos": os.environ.get("TRILINOS_KOKKOS"),
     "blas_provider": os.environ.get("BLAS_PROVIDER"),
     "mpi_family": os.environ.get("MPI_FAMILY"),
     "mpi_provider": os.environ.get("MPI_PROVIDER"),

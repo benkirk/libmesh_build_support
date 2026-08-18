@@ -159,6 +159,39 @@ check_libmesh_config_paths () {
 }
 
 #------------------------------------------------------------------------------
+# Every include path libMesh hands out must exist INSIDE this tree.
+#
+# The check above asks whether a path names /usr or /opt.  This asks the harder
+# question, and catches a case that one cannot: a path that is neither the
+# host's nor real.  assert_no_host_paths (lib/build_common.sh) strips $STACK and
+# $WORK before looking, so an include pointing into the BUILD tree -- $WORK/build/
+# libmesh-1.7.9/contrib/something, which exists on the builder and nowhere else --
+# survives it and ships.  libMesh has several contrib packages whose include
+# paths are written as $(top_srcdir)/contrib/..., so this is a live hazard every
+# time one of them is enabled, and tecio was just enabled.
+#
+# Directories, not files: -I naming a directory that is not there is the defect.
+# A consumer gets no error from it either -- the compiler ignores a missing -I
+# and then fails much later on a header it cannot find.
+check_libmesh_include_paths () {
+  local lmc="${LIBMESH_DIR}/bin/libmesh-config" flag p missing=""
+  [ -x "${lmc}" ] || return 0
+  echo "--- libmesh-config: every -I resolves inside the tree"
+  # Split the flag string on ' -', not on whitespace.  The tree's own path may
+  # contain a space -- distcheck deliberately unpacks into '.../a b/c' to keep
+  # A32 honest -- and splitting on whitespace tears such a path in half, which
+  # is what the first version of this check did.  It passed everywhere except
+  # the one place built to catch exactly that.
+  while IFS= read -r flag; do
+    case "${flag}" in -I?*) p="${flag#-I}" ;; *) continue ;; esac
+    [ -d "${p}" ] || missing="${missing}
+      ${p}"
+  done < <(METHOD=opt "${lmc}" --cppflags --include 2>/dev/null \
+           | awk '{ gsub(/ -/, "\n-"); print }')
+  [ -z "${missing}" ] || fail "libmesh-config names include director(ies) that do not exist:${missing}"
+}
+
+#------------------------------------------------------------------------------
 # Extra executables from libexec/, run serially and under mpiexec.
 #
 # The assertion is deliberately weak -- exit 0, and something on stdout -- because
@@ -192,6 +225,7 @@ case "${MODE}" in
   inplace)
     [ -f "${SMOKE_DIR}/Makefile" ] || fail "test/smoke/ has no Makefile"
     check_libmesh_config_paths
+    check_libmesh_include_paths
     make -C "${SMOKE_DIR}" all
     run_serial
     run_parallel
@@ -205,6 +239,7 @@ case "${MODE}" in
     # The prebuilt binary, first and unconditionally.
     [ -x "${SMOKE_BIN}" ] || fail "no prebuilt ${SMOKE_BIN} in the unpacked tree"
     check_libmesh_config_paths
+    check_libmesh_include_paths
     run_serial
     run_parallel
     run_ex4 serial

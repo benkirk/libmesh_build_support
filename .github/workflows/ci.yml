@@ -45,15 +45,33 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Two profiles now, on both platforms.  'default' is the pairing this project
+  # has always shipped and is the one that must stay green; 'bleeding' is the
+  # newer PETSc/libMesh/Trilinos set, and it is here rather than in extended.yml
+  # because a version pairing that is only checked weekly is a pairing nobody
+  # finds out about until Monday.
+  #
+  # It costs a second build per platform per PR, and two things hold that down
+  # until it has earned its place: it verifies on two base images rather than
+  # five (the glibc floor and a current distro -- what changes between profiles
+  # is what gets compiled, not how it relocates, and ci.yml's default legs
+  # already sweep the distro matrix), and it is experimental, so a red bleeding
+  # leg reports through the sidecar and the summarise job instead of blocking a
+  # PR that has nothing to do with it.  Both are temporary: when it has been
+  # green for a few weeks, drop 'experimental' and give it the full verify set.
   stack:
     strategy:
       fail-fast: false
       matrix:
         target_platform: [linux-64, linux-aarch64]
-    name: ${{ matrix.target_platform }}
+        profile: [default, bleeding]
+    name: ${{ matrix.profile }} · ${{ matrix.target_platform }}
     uses: ./.github/workflows/stack.yml
     with:
       target_platform: ${{ matrix.target_platform }}
+      profile: ${{ matrix.profile }}
+      verify_bases: ${{ matrix.profile == 'default' && '' || 'almalinux:8 ubuntu:24.04' }}
+      experimental: ${{ matrix.profile != 'default' }}
       # almalinux:9 because that is what the end-to-end runs in #4 used.  The
       # builder's own glibc barely matters -- conda supplies the compilers and
       # the sysroot pins GLIBC_FLOOR -- but "what we verified" beats "what we
@@ -68,3 +86,8 @@ jobs:
       # GITHUB_TOKEN is read-only and could not push anyway -- do not fail
       # trying.  When a restore path is built, this is already the right shape.
       publish_images: ${{ github.event_name != 'pull_request' }}
+      # Both profiles publish from main, and the bleeding one is worth having:
+      # its devel tag carries the profile, so 'make image-shell PROFILE=bleeding'
+      # finds it.  'experimental' does not weaken that -- it tolerates a red job
+      # in the run's conclusion, it does not let a failed build reach the publish
+      # steps, which are ordinary steps after the ones that failed.

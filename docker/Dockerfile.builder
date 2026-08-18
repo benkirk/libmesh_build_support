@@ -28,12 +28,13 @@
 # claim -- and the build log then prints exactly what each base image lacked,
 # which is the number we actually care about.
 #
-# HOST_EXTRAS is the one deliberate exception, and it is for NEGATIVE tests
-# only: distro dev packages a customer's workstation might happen to have
-# (boost-devel was the first), installed so that "the host cannot change the
-# artifact" is measured rather than assumed.  It is empty by default, it is not
-# part of the minimal-host claim, and an image built with it must never be
-# published -- see extended.yml's host-boost job and the guard in stack.yml.
+# HOST_EXTRAS (with HOST_REPOS to reach it) is the one deliberate exception, and
+# it is for NEGATIVE tests only: distro dev packages a customer's workstation
+# might happen to have (boost-devel was the first, and there is now one for every
+# probe libMesh makes), installed so that "the host cannot change the artifact"
+# is measured rather than assumed.  Both are empty by default, neither is part of
+# the minimal-host claim, and an image built with them must never be published --
+# see extended.yml's dirty-host job and the guard in stack.yml.
 ARG BASE_IMAGE=almalinux:9
 FROM ${BASE_IMAGE}
 
@@ -42,6 +43,13 @@ SHELL ["/bin/bash", "-c"]
 # Declared AFTER FROM on purpose: an ARG before FROM is scoped to the FROM line
 # and invisible to RUN, which would make the negative test pass vacuously.
 ARG HOST_EXTRAS=""
+# Repositories to reach HOST_EXTRAS with, same caveats.  The probes libMesh
+# makes are not all satisfiable from a stock RHEL-family base: eigen3-devel,
+# glpk-devel and NLopt-devel live in EPEL, and libXt-devel in PowerTools/CRB.
+# An entry ending in '-release' is INSTALLED (epel-release); anything else is
+# treated as a repository name and passed as --enablerepo (powertools, crb).
+# Ignored on Debian, where everything wanted here is in main.
+ARG HOST_REPOS=""
 
 RUN set -eo pipefail; \
     if   command -v dnf     >/dev/null 2>&1; then PM=dnf;    PS=procps-ng; XZ=xz;       GIT=git-core; \
@@ -73,8 +81,14 @@ RUN set -eo pipefail; \
     fi; \
     if [ -n "${HOST_EXTRAS}" ]; then \
       echo "==> host extras (negative test only, NOT part of the minimal-host claim): ${HOST_EXTRAS}"; \
+      rel=(); en=(); \
+      for r in ${HOST_REPOS}; do \
+        case "$r" in *-release) rel+=("$r") ;; *) en+=("--enablerepo=$r") ;; esac; \
+      done; \
       case "$PM" in \
-        dnf)    dnf -y install ${HOST_EXTRAS} && dnf clean all \
+        dnf)    if [ ${#rel[@]} -gt 0 ]; then echo "==> host repos: ${rel[*]}"; dnf -y install "${rel[@]}"; fi; \
+                if [ ${#en[@]} -gt 0 ]; then echo "==> enabling: ${en[*]}"; fi; \
+                dnf -y "${en[@]}" install ${HOST_EXTRAS} && dnf clean all \
                   && rpm -q ${HOST_EXTRAS} ;; \
         zypper) zypper --non-interactive install ${HOST_EXTRAS} && zypper clean -a \
                   && rpm -q ${HOST_EXTRAS} ;; \

@@ -56,6 +56,23 @@ libltdl
 # special case in patchelf.sh.
 perl
 
+# --- X11: headers only, never linked -----------------------------------------
+# contrib/tecplot/tecio includes <X11/Intrinsic.h> in every translation unit
+# (its MASTER.h turns -DLINUX into MOTIF), and libMesh's tecio.m4 disables
+# Tecplot output outright when that header is missing.  So the env carries the
+# X11 headers -- and nothing else about X11: no object in the tree DT_NEEDEDs
+# libXt, libX11 or their transitive libraries, because tecio uses the header for
+# typedefs and calls nothing.  Same category as cmake and m4 above: wanted while
+# building, not afterwards.
+#
+# Not optional tidiness, either.  xorg-libx11 ships 14 share/X11/locale/*/Compose
+# files carrying an absolute path into the build prefix, which relocate's text
+# fixup does not rewrite and validate.sh fails on -- measured, and the reason
+# this section exists rather than being left for later.
+xorg-*
+libxcb
+pthread-stubs
+
 # --- glibc floor offenders -----------------------------------------------
 # Measured on linux-aarch64: of 837 ELF objects in the solved env, exactly TWO
 # require a glibc newer than the 2.28 floor -- libsystemd.so.0 and libudev.so.1,

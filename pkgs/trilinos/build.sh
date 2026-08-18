@@ -3,7 +3,10 @@
 #
 # v0 enabled exactly two packages -- Sacado and Pliris -- and turned Kokkos off.
 # That narrowness is the point of this recipe and is preserved: Trilinos is
-# enormous, and what this stack has ever shipped is a small corner of it.
+# enormous, and what this stack has ever shipped is a small corner of it.  One
+# part of that narrowness is now a per-profile CHOICE rather than a fixed
+# answer: see TRILINOS_KOKKOS further down.
+#
 # Three changes, each forced by the new design:
 #
 #   1. -DBUILD_SHARED_LIBS=ON.
@@ -56,6 +59,30 @@ log "archiver ${ar_bin}, ranlib ${ranlib_bin}"
 # TPL_ENABLE_MPI=ON makes TriBITS locate mpicc/mpicxx/mpif90 on PATH, which
 # activate_toolchain has already pointed at $STACK/bin.  v0 relied on the same
 # thing; naming the compilers explicitly here would only duplicate it.
+
+# TRILINOS_KOKKOS: 'off' (the default, and every profile but 'bleeding') passes
+# v0's -DTrilinos_ENABLE_Kokkos=OFF; 'auto' passes NOTHING and lets Trilinos'
+# own defaults decide.
+#
+# The flag is v0's answer to a question Trilinos 13 asked, carried forward
+# without being re-asked.  profiles/README.md predicted it would not survive a
+# version bump -- "Kokkos became a mandatory dependency of Sacado in later
+# Trilinos" -- and that prediction is wrong: 16-1-0 configures and builds with
+# it, because Sacado's Kokkos dependence is OPTIONAL ("Setting
+# Sacado_ENABLE_Kokkos=OFF because Sacado has an optional library dependence on
+# disabled package Kokkos"), and the enabled set comes out the same four
+# packages as 14-4-0.  So this is a real choice, not a constraint, and a
+# customer building 16.1.0 by hand passes no Kokkos flag at all -- which is what
+# 'auto' reproduces.
+kokkos=()
+case "${TRILINOS_KOKKOS:-off}" in
+  auto) log "Kokkos: no flag; Trilinos' own defaults decide" ;;
+  off)  kokkos=( -DTrilinos_ENABLE_Kokkos=OFF )
+        log "Kokkos: explicitly OFF (v0's answer)" ;;
+  *) echo "TRILINOS_KOKKOS must be 'off' or 'auto', got: ${TRILINOS_KOKKOS}" >&2
+     exit 1 ;;
+esac
+
 cmake \
     -DCMAKE_INSTALL_PREFIX="${STACK}" \
     -DCMAKE_AR="${ar_bin}" \
@@ -63,7 +90,7 @@ cmake \
     -DTPL_ENABLE_MPI=ON \
     -DTrilinos_ENABLE_Sacado=ON \
     -DTrilinos_ENABLE_Pliris=ON \
-    -DTrilinos_ENABLE_Kokkos=OFF \
+    ${kokkos[@]+"${kokkos[@]}"} \
     -DBUILD_SHARED_LIBS=ON \
     -DTPL_ENABLE_DLlib=ON \
     -DTPL_ENABLE_BLAS=ON -DTPL_BLAS_LIBRARIES="${blas}" \

@@ -87,6 +87,30 @@ log "archiver ${ar_bin}, ranlib ${ranlib_bin}"
 #   -fallow-argument-mismatch  the gfortran >= 10 counterpart, for legacy
 #     Fortran that passes mismatched types to MPI routines.
 #
+# --download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF: do not build
+# SuiteSparse's demo programs, which this stack neither runs nor ships.
+#
+# Measured on PETSc 3.23.7 (aarch64), where they are what fails the build:
+# SuiteSparse's own SUITESPARSE_DEMOS defaults OFF, but CHOLMOD/CMakeLists.txt
+# gates them on 'SUITESPARSE_DEMOS OR BUILD_TESTING', and BUILD_TESTING is ON by
+# default.  Linking cholmod_di_demo then dies --
+#
+#     ld: warning: libopenblas.so.0, needed by libcholmod.so.5.3.1, not found
+#         (try using -rpath or -rpath-link)
+#     make[3]: *** [CHOLMOD/.../cholmod_di_demo] Error 1
+#     Error running make on  SUITESPARSE
+#
+# -- because a demo executable needs an -rpath-link to resolve a dependency of
+# the library it links, and nothing supplies one.  The LIBRARIES this stack
+# actually installs are unaffected; relocate/patchelf.sh gives every one of them
+# an $ORIGIN rpath afterwards.  Turning the demos off is the narrower fix than
+# putting $STACK/lib on LD_LIBRARY_PATH for the whole PETSc build, and it is
+# also the honest one: nothing here wanted them built.
+#
+# The older SuiteSparse that PETSc 3.20.5 downloads does not build them, so this
+# is a no-op on the default profile -- verified against the artifact, not
+# assumed.
+#
 # These reach every --download- package, which is the point: PETSc passes its
 # flags down to each TPL's own build system, and the TPLs are the old code.
 python3 ./configure \
@@ -96,6 +120,7 @@ python3 ./configure \
     --with-spooles=1 --download-spooles=yes \
     --with-ml=1 --download-ml=yes \
     --with-suitesparse=1 --download-suitesparse=yes \
+    --download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF \
     --with-superlu=1 --download-superlu=yes \
     --with-scalapack=1 --download-scalapack=yes \
     "${blaslapack[@]}" --with-x=0 \

@@ -10,7 +10,7 @@ in [`plans/implemented/RELOCATABLE-STACK-PLAN.md`](plans/implemented/RELOCATABLE
 | workflow | trigger | what it answers |
 |---|---|---|
 | `checks.yml` | pushes to `main`, every PR, on demand | the fast gate: does it parse, lint, order itself, do the ISA regexes still match, does every base image build, do the docs' links resolve — about two minutes |
-| `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | the default configuration on `linux-64` **and** `linux-aarch64`, verified on all five base images; on `main` it also publishes the builder and devel images |
+| `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | two version profiles × `linux-64` and `linux-aarch64`. `default` verifies on all five base images; `bleeding` on two and `experimental: true` until it has been green a while. On `main` it also publishes the builder and devel images |
 | `stack.yml` | called, never triggered | the reusable build-and-verify implementation, parameterized |
 | `extended.yml` | Mondays 06:17 UTC, and on demand | the knobs nobody runs daily: fresh conda solve, MKL, parallel HDF5, libMesh from git, a Debian-family builder, the `customer_demo` branch |
 | `customer-demo.yml` | push to `main`, nightly | rebases the `customer_demo` branch onto `main`, verifies it, force-pushes with lease — the one workflow with `contents: write` |
@@ -45,6 +45,13 @@ Four decisions behind that shape:
 - **The fast gate is separate from the expensive one.** Most mistakes here are
   catchable in two minutes without building anything; A1 was that class of
   break, and `make -n all` under `-j8` is what catches it.
+- **A second profile is a second thing to compile, not a second thing to
+  resolve.** `bleeding` (PETSc 3.23.7 / libMesh 1.8.4 / Trilinos 16-1-0) builds
+  from the same conda env as `default`: `cmake<4` is above Trilinos 16's floor
+  and `python<3.13` is fine for PETSc 3.23, and both are pruned build tools
+  anyway. So `PROFILE` is part of `SHA_BUILD` and deliberately not part of
+  `SHA_CONDA` — one builder image serves both profiles, and only the `devel`
+  image is per-profile.
 - **`ci.yml` builds from the checked-in lock where one exists; `extended.yml`'s
   `fresh-solve` solves from the spec.** A lock can never report that `conda/env/*.yml` has
   stopped resolving to something that works, so `fresh-solve` ignores it weekly
@@ -87,7 +94,7 @@ SIGINT as "stop this container"; the default TERM would orphan it.
 
 | name | contents |
 |---|---|
-| `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz` |
+| `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-<profile>][-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz`. Only a non-default profile appears, so existing names did not move |
 | `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, `lock/` (the checked-in locks, overwritten by the fresh solve when `refresh_lock` ran), `df.txt` |
 | `result-build-…`, `result-verify-…-<base>` | one JSON per job, for `summarise` |
 
@@ -131,7 +138,7 @@ red was invisible (PR #14).
 | `libmesh-git` | both platforms, `LIBMESH_SOURCE=git` | the git-source path, and the only job needing git in the image *and* autotools in the env |
 | `builder-distro` | `linux-64` on `ubuntu:24.04` | the builder's own distro should be irrelevant; PR #20 found it lending us `ar` |
 | `customer-demo-stack` | `linux-64`, `source_ref: customer_demo`, `site_dirs: customer` | a customer's own two packages layered on through `SITE_DIRS`, from the branch that carries them — the `EXTENDING.md` extension point built for real |
-| `host-boost` | `linux-64` on `almalinux:8` with `host_extras: boost-devel` | a deliberately dirtied builder: the Rocky 8 + Boost 1.66 case that broke libMesh's configure, now expected to build identically to a clean host (`DESIGN.md`, host dev packages) |
+| `dirty-host` | `linux-64` on `almalinux:8`, `host_repos: epel-release powertools`, `host_extras:` `boost-devel eigen3-devel libtirpc-devel libXt-devel glpk-devel cppunit-devel` | a deliberately dirtied builder — one distro dev package for every probe libMesh's m4 makes — expected to build identically to a clean host (`DESIGN.md`, host dev packages) |
 
 All but `fresh-solve` are `experimental: true`; all but `fresh-solve` and `mkl`
 verify on two bases (`almalinux:8`, `ubuntu:24.04`) rather than five — if a
@@ -153,7 +160,7 @@ one only from a solve someone watched succeed.
 |---|---|
 | `build` job, default config | `docker compose run --rm build` (its command is `make all`); on Apple Silicon add `PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64` for the x86 column |
 | one `verify (<base>)` job | `VERIFY_IMAGE=<base> docker compose run --rm --build verify` — **`--build` is load-bearing**: without it compose reuses the last image and silently ignores `VERIFY_IMAGE`. Check the `=== verify on <distro>, glibc <v>` line |
-| the `host-boost` job | `BASE_IMAGE=almalinux:8 HOST_EXTRAS=boost-devel docker compose -p dirty build build && docker compose -p dirty run --rm build` — a separate project name, so the dirtied image and its build root do not become tomorrow's clean build |
+| the `dirty-host` job | `BASE_IMAGE=almalinux:8 HOST_REPOS='epel-release powertools' HOST_EXTRAS='boost-devel eigen3-devel libtirpc-devel libXt-devel glpk-devel cppunit-devel' docker compose -p dirty build build && docker compose -p dirty run --rm build` — a separate project name, so the dirtied image and its build root do not become tomorrow's clean build |
 | the fast gate | `make -n all && make help`, `shellcheck --severity=warning $(git ls-files '*.sh')`, `python3 relocate/isa-scan.py --self-test`, `python3 .github/scripts/check-md-links.py` |
 | the published image | `make image-shell` on the commit CI built |
 
