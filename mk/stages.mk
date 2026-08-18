@@ -1,8 +1,8 @@
 # mk/stages.mk -- the stage targets and their ordering.
 # Mirrors the numbered steps in docs/DESIGN.md (the pipeline section):
 #
-#   1 conda -> 2 build -> 3 test -> 4 relocate -> validate -> 5 test
-#                      -> 6 slim -> validate -> 7 dist -> distcheck
+#   1 conda -> wrappers -> 2 build -> 3 test -> 4 relocate -> validate
+#           -> 5 test -> 6 slim -> validate -> 7 dist -> 8 distcheck
 #
 # Ordering is expressed as a real dependency graph, not as a sequence of
 # sub-makes, so 'make -n all' prints the plan once and in order.
@@ -15,10 +15,11 @@
 # it is not a gate.
 
 .PHONY: all conda wrappers wrappers-check build test relocate validate slim \
-        dist distcheck help shell shell-check image-shell clean distclean \
-        conda-lock \
-        print-config
+        dist distcheck shell shell-check image-shell print-config conda-lock \
+        clean distclean help
 
+#-------------------------------------------------------------------------------
+##@ Pipeline -- 'make all' runs these in order
 ## all: the whole workflow, conda through distcheck
 all: distcheck
 
@@ -64,15 +65,7 @@ $(STAMPS)/conda.stamp: conda/bootstrap.sh $(wildcard conda/env/*.yml) | $(STAMPS
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
-## build: step 2 -- build the source packages into the same prefix
-build: $(STAMPS)/build.stamp
-$(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
-                       $(foreach p,$(BUILD_PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
-	$(call run_hooks,post-build)
-	$(Q)touch $@
-
-#-------------------------------------------------------------------------------
-## wrappers: generate the build-time compiler wrappers that pin the ISA baseline
+## wrappers: between 1 and 2 -- the build-time wrappers that pin the ISA baseline
 wrappers: $(STAMPS)/wrappers.stamp
 $(STAMPS)/wrappers.stamp: $(STAMPS)/conda.stamp \
                           wrappers/generate.sh wrappers/selftest.sh | $(STAMPS)
@@ -86,12 +79,6 @@ $(STAMPS)/wrappers.stamp: $(STAMPS)/conda.stamp \
 	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
 	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
 	$(Q)touch $@
-
-## wrappers-check: prove the wrappers cap the ISA, by scanning what they emit
-# Always re-runs: it is a gate, and it is seconds, not minutes.
-wrappers-check: $(STAMPS)/wrappers.stamp wrappers/selftest.sh
-	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
-	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
 
 #-------------------------------------------------------------------------------
 # pre-build runs once, before any package -- hence its own stamp rather than
@@ -107,7 +94,15 @@ $(STAMPS)/prebuild.stamp: $(STAMPS)/wrappers.stamp | $(STAMPS)
 $(foreach p,$(PKGS),$(eval $(STAMPS)/$(p).stamp: $(STAMPS)/prebuild.stamp))
 
 #-------------------------------------------------------------------------------
-## test: build and run the smoke example in place -- always re-runs
+## build: step 2 -- build the source packages into the same prefix
+build: $(STAMPS)/build.stamp
+$(STAMPS)/build.stamp: $(STAMPS)/prebuild.stamp \
+                       $(foreach p,$(BUILD_PKGS),$(STAMPS)/$(p).stamp) | $(STAMPS)
+	$(call run_hooks,post-build)
+	$(Q)touch $@
+
+#-------------------------------------------------------------------------------
+## test: steps 3 and 5 -- build and run the smoke example in place; always re-runs
 test: $(STAMPS)/build.stamp
 	$(call do_test,in place)
 
@@ -137,7 +132,7 @@ $(STAMPS)/relocate.stamp: $(STAMPS)/test-built.stamp \
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
-## validate: the gate -- no unexpected host dependencies, C++ runtime in-tree
+## validate: the gate at steps 4 and 6 -- no host deps, C++ runtime in-tree
 validate: $(STAMPS)/relocate.stamp relocate/validate.sh
 	$(call do_validate,relocated)
 
@@ -176,7 +171,7 @@ $(STAMPS)/validate-slimmed.stamp: $(STAMPS)/slim.stamp relocate/validate.sh | $(
 	$(Q)touch $@
 
 #-------------------------------------------------------------------------------
-## dist: step 7a -- reproducible tarball of the pruned, slimmed, validated tree
+## dist: step 7 -- reproducible tarball of the pruned, slimmed, validated tree
 dist: $(STAMPS)/validate-slimmed.stamp | $(DIST_DIR)
 	$(call run_hooks,pre-dist)
 	$(SAY) TAR '$(notdir $(TARBALL))'
@@ -185,7 +180,7 @@ dist: $(STAMPS)/validate-slimmed.stamp | $(DIST_DIR)
 	  -czf '$(TARBALL)' -C '$(BUILD_ROOT)' stack
 	$(call run_hooks,post-dist)
 
-## distcheck: step 7b -- untar at a different depth and prove it still works
+## distcheck: step 8 -- untar at a different depth and prove it still works
 distcheck: dist
 	$(SAY) CHECK 'relocating to a different path depth'
 	$(Q)env $(PKG_ENV) TARBALL='$(TARBALL)' BUILD_ROOT='$(BUILD_ROOT)' \
@@ -194,12 +189,28 @@ distcheck: dist
 	  bash test/distcheck.sh
 
 #-------------------------------------------------------------------------------
-## conda-lock: regenerate the checked-in explicit lock files
-conda-lock:
-	$(SAY) LOCK 'conda/lock'
-	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' \
-	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
+##@ Gates -- always re-run, and each is seconds rather than minutes
+## wrappers-check: prove the wrappers cap the ISA, by scanning what they emit
+# Always re-runs: it is a gate, and it is seconds, not minutes.
+wrappers-check: $(STAMPS)/wrappers.stamp wrappers/selftest.sh
+	$(SAY) WRAPCHECK '$(ISA_BASELINE)'
+	$(Q)env $(PKG_ENV) bash wrappers/selftest.sh
 
+## shell-check: prove 'make shell' can build against the stack unaided
+# The gate for the target above, and it asserts on BINARIES rather than on the
+# environment: through lib/devshell.sh, and with no hand-written flags at all,
+# it builds and runs libMesh's introduction_ex4 and then links a bare -lpetsc.
+# Both are needed -- ex4 covers the customer-shaped path but cannot fail on a
+# missing -rpath-link, because libmesh-config enumerates the transitive
+# libraries; the bare -lpetsc is what the old PATH-only shell could not link.
+#
+# Needs the toolchain in the tree, so it belongs before slim, not after.
+shell-check: $(STAMPS)/build.stamp lib/shell-check.sh lib/devshell.sh
+	$(SAY) SHELLCHECK '$(STACK)'
+	$(Q)env $(PKG_ENV) bash lib/shell-check.sh
+
+#-------------------------------------------------------------------------------
+##@ Shells
 ## shell: an interactive shell that IS the package build environment
 # Not merely $(STACK)/bin on PATH, which is what this used to be.  lib/devshell.sh
 # runs the same activate_toolchain every pkgs/*/build.sh runs, so CC/CXX/FC,
@@ -215,19 +226,6 @@ shell: $(STAMPS)/wrappers.stamp
 	$(SAY) SHELL '$(STACK)'
 	$(Q)env $(PKG_ENV) bash --rcfile '$(CURDIR)/lib/devshell.sh' -i
 
-## shell-check: prove 'make shell' can build against the stack unaided
-# The gate for the target above, and it asserts on BINARIES rather than on the
-# environment: through lib/devshell.sh, and with no hand-written flags at all,
-# it builds and runs libMesh's introduction_ex4 and then links a bare -lpetsc.
-# Both are needed -- ex4 covers the customer-shaped path but cannot fail on a
-# missing -rpath-link, because libmesh-config enumerates the transitive
-# libraries; the bare -lpetsc is what the old PATH-only shell could not link.
-#
-# Needs the toolchain in the tree, so it belongs before slim, not after.
-shell-check: $(STAMPS)/build.stamp lib/shell-check.sh lib/devshell.sh
-	$(SAY) SHELLCHECK '$(STACK)'
-	$(Q)env $(PKG_ENV) bash lib/shell-check.sh
-
 ## image-shell: pull the published image for this config and shell into it
 # The remote counterpart of 'shell': no local build root needed.  Names the tag
 # the same way CI did (STAGE=devel by default), pulls it, and drops in with the
@@ -240,6 +238,8 @@ image-shell:
 	  GCC_VERSION='$(GCC_VERSION)' PROFILE='$(PROFILE)' \
 	  bash docker/pull-shell.sh
 
+#-------------------------------------------------------------------------------
+##@ Housekeeping
 ## print-config: show the resolved knobs and paths
 print-config:
 	@printf '%-16s %s\n' \
@@ -259,6 +259,13 @@ print-config:
 	  'PACKAGES (git)' '$(or $(strip $(foreach p,$(PKGS),$(if $(filter git,$(PKG_SOURCE_$(p))),$(p)@$(PKG_GIT_REF_$(p))))),none)' \
 	  TARBALL '$(TARBALL)'
 
+#-------------------------------------------------------------------------------
+## conda-lock: regenerate the checked-in explicit lock files
+conda-lock:
+	$(SAY) LOCK 'conda/lock'
+	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' \
+	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
+
 ## clean: remove build stamps and logs, keep the conda env and caches
 clean:
 	$(Q)rm -rf '$(STAMPS)' '$(LOGS)'
@@ -268,8 +275,16 @@ distclean:
 	$(Q)rm -rf '$(BUILD_ROOT)'
 
 ## help: list the available targets
+# In file order, not sorted: the pipeline targets are numbered, and an
+# alphabetical list printed them 2, 1, 7, 8, 4, 6.  '##@' opens a section.
+# awk over $(MAKEFILE_LIST) rather than grep|sed|sort because this is
+# .DEFAULT_GOAL and Dockerfile.builder's CMD, so it has to be hard to break.
 help:
 	@echo 'Targets:'
-	@grep -hE '^## ' $(MAKEFILE_LIST) | sed 's/^## /  /' | sort
+	@awk '/^##@ /{printf "\n%s\n", substr($$0,5); next} \
+	      /^## /{sub(/^## /,""); i=index($$0,": "); \
+	             printf "  %-16s %s\n", substr($$0,1,i-1), substr($$0,i+2)}' \
+	  $(MAKEFILE_LIST)
 	@echo
-	@echo "Run 'make print-config' to see the resolved settings."
+	@echo "make print-config  the resolved knobs and paths"
+	@echo "make shell         a shell with the build toolchain (docs/EXTENDING.md)"
