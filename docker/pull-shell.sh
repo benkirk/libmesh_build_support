@@ -103,18 +103,30 @@ EOF
   exit 1
 fi
 
-# Put the stack's bin on PATH, the way 'make shell' does for a local tree.  The
-# path is read from the image's own BUILD_ROOT, so there is nothing to keep in
-# sync here.  Default command is an interactive shell; anything passed through
-# is run instead (e.g. 'pull-shell.sh make build').
+# Hand off to 'make shell', so the pulled image gives the same environment a
+# local tree does -- the build toolchain, not just $PATH.  The path is read from
+# the image's own BUILD_ROOT, so there is nothing to keep in sync here.  Default
+# command is that shell; anything passed through is run instead (e.g.
+# 'pull-shell.sh make build').
+#
+# Guarded on the conda env actually being present, because STAGE=builder images
+# have no build root: there, 'make shell' would not drop you into a shell, it
+# would start a conda bootstrap.  Those keep the PATH-only treatment, which is
+# all that image can honestly offer.
 PLATFORM="${PLATFORM:-}"
 platform_arg=()
 [ -n "${PLATFORM}" ] && platform_arg=(--platform "${PLATFORM}")
+
+# shellcheck disable=SC2016  # expanded inside the container, not here
+shell_cmd='if [ -d "${BUILD_ROOT}/stack/etc/conda/activate.d" ]; then
+             cd /src && exec make shell
+           else
+             export PATH="${BUILD_ROOT}/stack/bin:${PATH}"; exec bash -i
+           fi'
 
 if [ "$#" -gt 0 ]; then
   exec docker run --rm -it "${platform_arg[@]}" "${ref}" \
     bash -lc 'export PATH="${BUILD_ROOT}/stack/bin:${PATH}"; exec "$@"' _ "$@"
 else
-  exec docker run --rm -it "${platform_arg[@]}" "${ref}" \
-    bash -c 'export PATH="${BUILD_ROOT}/stack/bin:${PATH}"; exec bash -i'
+  exec docker run --rm -it "${platform_arg[@]}" "${ref}" bash -c "${shell_cmd}"
 fi

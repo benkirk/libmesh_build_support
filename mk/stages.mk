@@ -15,7 +15,8 @@
 # it is not a gate.
 
 .PHONY: all conda wrappers wrappers-check build test relocate validate slim \
-        dist distcheck help shell image-shell clean distclean conda-lock \
+        dist distcheck help shell shell-check image-shell clean distclean \
+        conda-lock \
         print-config
 
 ## all: the whole workflow, conda through distcheck
@@ -199,12 +200,33 @@ conda-lock:
 	$(Q)env $(PKG_ENV) CONDA_HOME='$(CONDA_HOME)' \
 	  HDF5_PARALLEL='$(HDF5_PARALLEL)' bash conda/lock.sh
 
-## shell: an interactive shell with $(STACK)/bin on PATH
-# Deliberately minimal.  $(STACK)/activate.sh, installed by relocate, is the
-# real entry point; this exists for the stages before it.
-shell: $(STAMPS)/conda.stamp
+## shell: an interactive shell that IS the package build environment
+# Not merely $(STACK)/bin on PATH, which is what this used to be.  lib/devshell.sh
+# runs the same activate_toolchain every pkgs/*/build.sh runs, so CC/CXX/FC,
+# CPPFLAGS/LDFLAGS, PKG_CONFIG_PATH and -- the one that actually bites -- the ISA
+# wrappers ahead of $(STACK)/bin are all what a recipe would see.  Its header
+# explains why an approximation is worse than nothing here.
+#
+# wrappers.stamp rather than conda.stamp on purpose: without it $(WORK)/wrappers/bin
+# may not exist, activate_toolchain says so and carries on, and the shell quietly
+# stops matching the build again.  It costs seconds and 'make build' needs it
+# anyway.  To debug the wrappers themselves: make USE_WRAPPERS=no shell.
+shell: $(STAMPS)/wrappers.stamp
 	$(SAY) SHELL '$(STACK)'
-	$(Q)env $(PKG_ENV) PATH='$(STACK)/bin':"$$PATH" bash -i
+	$(Q)env $(PKG_ENV) bash --rcfile '$(CURDIR)/lib/devshell.sh' -i
+
+## shell-check: prove 'make shell' can build against the stack unaided
+# The gate for the target above, and it asserts on BINARIES rather than on the
+# environment: through lib/devshell.sh, and with no hand-written flags at all,
+# it builds and runs libMesh's introduction_ex4 and then links a bare -lpetsc.
+# Both are needed -- ex4 covers the customer-shaped path but cannot fail on a
+# missing -rpath-link, because libmesh-config enumerates the transitive
+# libraries; the bare -lpetsc is what the old PATH-only shell could not link.
+#
+# Needs the toolchain in the tree, so it belongs before slim, not after.
+shell-check: $(STAMPS)/build.stamp lib/shell-check.sh lib/devshell.sh
+	$(SAY) SHELLCHECK '$(STACK)'
+	$(Q)env $(PKG_ENV) bash lib/shell-check.sh
 
 ## image-shell: pull the published image for this config and shell into it
 # The remote counterpart of 'shell': no local build root needed.  Names the tag
