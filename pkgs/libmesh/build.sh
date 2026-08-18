@@ -11,11 +11,31 @@
 #   --enable-tecio       Tecplot I/O from contrib.
 #   --enable-petsc-required  fail configure if PETSc is not found, rather than
 #                        quietly building a libMesh without it.
-#   --with-boost=$STACK  Boost comes from the stack or from libMesh's bundled
-#                        subset; the host is never consulted.  Not v0's: added
-#                        after a Rocky 8 host with boost-devel 1.66 in
-#                        /usr/include broke the build.  See the flag itself.
+#   --with-boost=$STACK  Boost comes from the stack; the host is never consulted.
+#                        Not v0's: added after a Rocky 8 host with boost-devel
+#                        1.66 in /usr/include broke the build.  See the flag.
 #   --with-vexcl=no      the other half of the same fix, for contrib/metaphysicl.
+#
+# Everything below --with-boost is the same argument continued, one optional
+# package at a time.  Each of these has a default search that reaches /usr, and
+# each records what it finds in the compile line libmesh-config hands customers:
+#
+#   --with-eigen-include=$STACK/include/eigen3
+#                        conda's Eigen.  NOT $STACK/include -- that is where
+#                        libMesh's own bundled copy installs itself, and finding
+#                        that would be the A30 trap wearing a different hat.
+#   --with-tecio-x11-include=$STACK/include
+#                        the X11 headers contrib/tecplot/tecio needs.  Without
+#                        them tecio.m4 disables Tecplot output SILENTLY, which
+#                        is what it has been doing since v0.
+#   --enable-glpk, --with-glpk-include, --with-glpk-lib
+#                        v0 passed --disable-glpk.  The choice was never
+#                        "on or off" but "off, or whatever the host had"; now it
+#                        is on, from the stack.
+#   --disable-nlopt      no conda-forge nlopt exists without numpy and a python
+#                        extension module (conda/bootstrap.sh has the evidence),
+#                        so it is explicitly OFF rather than left to probe /usr.
+#   XDR                  version-dependent; see the block above configure.
 #
 # What is deliberately absent: --enable-trilinos.  v0 built Trilinos alongside
 # libMesh, never into it.
@@ -97,10 +117,11 @@ export PETSC_ARCH=""
 # --with-boost=<dir> makes ax_boost_base look ONLY under <dir>/include and
 # forwards to metaphysicl (AX_SUBDIRS_CONFIGURE passes every top-level arg),
 # whose boost.m4 then looks only under <dir>/include and <dir> and ignores
-# BOOST_ROOT.  $STACK holds no Boost on a first pass, so libMesh falls back to
-# contrib/boost (1.7.x, 1.8.x) and configures without Boost on a devel checkout
-# that no longer bundles one; a conda libboost-headers in the env would be found
-# there as an in-stack external.  --with-vexcl=no skips metaphysicl's whole
+# BOOST_ROOT.  $STACK now holds conda's libboost-headers, so both find it there
+# as an in-stack EXTERNAL Boost -- which is the intended answer, and why the
+# assertion below asks WHERE the Boost is rather than whether there is one.
+# libMesh's bundled contrib/boost subset (present through 1.8.x, gone on devel)
+# is what a stack without one falls back to.  --with-vexcl=no skips metaphysicl's whole
 # VexCL block -- the Boost library chain that was fatal, and an OpenCL header
 # probe of /usr/include with it.  VexCL is a metaphysicl test dependency libMesh
 # never uses.
@@ -111,6 +132,63 @@ export PETSC_ARCH=""
 # whole AX_BOOST_BASE body, so external_boost_found stays yes and you get a
 # bogus HAVE_EXTERNAL_BOOST with no include path and no subset.  Both checked
 # against m4/boost.m4 and m4/ax_boost_base.m4 at v1.7.8, v1.8.0 and devel.
+#------------------------------------------------------------------------------
+# Fail here if the env does not hold what the flags below are about to point at.
+#
+# A stale conda/lock is exactly how that happens, and it happens SILENTLY: a
+# lock shadows the spec list in conda/bootstrap.sh, so adding a package there
+# without refreshing the lock leaves the package absent and every --with- flag
+# below pointing at nothing.  configure would then quietly fall back -- to the
+# bundled Eigen, to no XDR, to no Tecplot -- and the first evidence would be a
+# feature missing from an artifact nobody was looking at.  Two lines here beat
+# reading a 4000-line config.log later.
+for f in include/boost/version.hpp \
+         include/eigen3/Eigen/Dense \
+         include/tirpc/rpc/xdr.h \
+         include/X11/Intrinsic.h \
+         include/glpk.h; do
+  [ -e "${STACK}/${f}" ] || {
+    echo "the env is missing ${f}, which this recipe configures against." >&2
+    echo "  Refresh the lock: make conda IGNORE_LOCK=1 && make conda-lock" >&2
+    exit 1; }
+done
+
+#------------------------------------------------------------------------------
+# XDR: the same destination by two different roads, because libMesh changed how
+# it asks.
+#
+# 1.8.x has --with-xdr-include / --with-xdr-libname.  Given them, configure tries
+# ONLY that path ("to avoid accidentally bringing in any unwanted system RPC
+# headers", says the m4) and records the result in libmesh_optional_INCLUDES and
+# _LIBS -- exported, relocatable, exactly what we want.
+#
+# 1.7.x has neither flag.  Its whole XDR probe is: link-test <rpc/xdr.h> with
+# the ambient CPPFLAGS and LIBS, and if that fails, retry with a HARD-CODED
+# -I/usr/include/tirpc -ltirpc -- which, on a host that has libtirpc-devel, it
+# then writes into libmesh_optional_INCLUDES.  A host path in the artifact.  So
+# the ambient flags are the only lever, and they are a sufficient one: CPPFLAGS
+# reaches consumers through 'libmesh-config --cppflags', and relocate/fixup-text.sh
+# rewrites the prefix in it like any other text file.  Winning the FIRST test is
+# also what stops the /usr/include/tirpc fallback from ever running.
+#
+# Which road is taken is decided by asking the configure script what it accepts,
+# not by parsing PKG_VERSION: PKG_SOURCE=git can be any ref at all, and the flag
+# either exists in that source or it does not.
+xdr_inc="${STACK}/include/tirpc"
+xdr_flags=()
+xdr_libs=""
+if grep -q -- '--with-xdr-include' "${src}/configure"; then
+  xdr_flags=( --with-xdr-include="${xdr_inc}" --with-xdr-libname=tirpc )
+  log "XDR: --with-xdr-include=${xdr_inc} (this libMesh takes the flag)"
+else
+  export CPPFLAGS="${CPPFLAGS} -I${xdr_inc}"
+  xdr_libs=" -ltirpc"
+  log "XDR: via CPPFLAGS and LIBS (this libMesh has no --with-xdr-include)"
+fi
+
+# ${arr[@]+"${arr[@]}"} rather than a bare "${arr[@]}": under 'set -u' an empty
+# array expansion is an unbound-variable error in bash before 4.4, and
+# almalinux:8 ships 4.4.19 -- close enough to the line to not stand on it.
 "${src}"/configure \
     --prefix="${STACK}" \
     --enable-shared --disable-static \
@@ -124,14 +202,19 @@ export PETSC_ARCH=""
     --enable-blocked-storage \
     --with-methods=opt \
     --enable-unique-id \
-    --enable-tecio \
-    --disable-glpk \
+    --enable-tecio --with-tecio-x11-include="${STACK}/include" \
+    --enable-glpk \
+      --with-glpk-include="${STACK}/include" \
+      --with-glpk-lib="${STACK}/lib" \
+    --disable-nlopt \
     --enable-hdf5 --with-hdf5="${STACK}" \
     --enable-petsc-required \
     --with-boost="${STACK}" \
     --with-vexcl=no \
+    --with-eigen-include="${STACK}/include/eigen3" \
+    ${xdr_flags[@]+"${xdr_flags[@]}"} \
     PETSC_DIR="${STACK}" \
-    LIBS="-lm -L${STACK}/lib -lz" \
+    LIBS="-lm -L${STACK}/lib -lz${xdr_libs}" \
     --disable-dap
 
 #------------------------------------------------------------------------------
@@ -199,37 +282,79 @@ else
 fi
 
 #------------------------------------------------------------------------------
-# Assert what configure decided about Boost -- before a 15-minute compile, and
-# on the generated files rather than on the flags above.  configure has already
-# written include/libmesh_config.h (the LIBMESH_-prefixed header 'make' will
-# install as include/libmesh/libmesh_config.h) and contrib/bin/libmesh-config
-# into the build tree.
+# Assert what configure DECIDED, on the generated files rather than on the flags
+# above, and before a fifteen-minute compile.
 #
-# Two things can put an external Boost here: a host Boost that got past the
-# flags (a new libMesh whose m4 searches somewhere else), or a rebuild over a
-# populated $STACK, where the subset a previous pass installed to
-# $STACK/include/boost is found through -I$STACK/include and misclassified as
-# external (A30: the build that counts starts from a clean $STACK).  Either
-# way, stop here rather than ship it.
+# Every optional package in this recipe fails the same way when it fails: not
+# with an error, but by quietly configuring itself off and building a libMesh
+# that is missing a feature.  --enable-tecio is the standing proof -- it has been
+# in this option list since v0, and HAVE_TECPLOT_API has never once been defined
+# in a shipped artifact, because tecio.m4 disables itself when it cannot find
+# X11 headers and says so in a line nobody reads.  A flag is a request; this is
+# the receipt.
+#
+# The OFF list matters as much as the ON list.  Each of those has a default
+# search that reaches into /usr, so "off" here means "off on purpose", and a
+# name appearing in that column later is how we learn a build host was consulted.
+LIBMESH_FEATURES_ON="HAVE_BOOST HAVE_EXTERNAL_BOOST HAVE_EIGEN HAVE_EIGEN_DENSE
+  HAVE_EIGEN_SPARSE HAVE_XDR HAVE_HDF5 HAVE_HDF5_CXX HAVE_NETCDF HAVE_EXODUS_API
+  HAVE_TECPLOT_API HAVE_GLPK HAVE_METAPHYSICL HAVE_PETSC HAVE_TRIANGLE"
+LIBMESH_FEATURES_OFF="HAVE_NLOPT HAVE_VTK HAVE_TRILINOS HAVE_CURL HAVE_CAPNPROTO
+  HAVE_SLEPC"
+
+# assert_libmesh_features FILE LABEL -- read a libmesh_config.h, in the build
+# tree or installed, and hold it to the two lists above.
+#
+# The two columns are not checked the same way, and cannot be: autoheader writes
+# a disabled entry as '/* #undef HAVE_VTK */' -- unprefixed -- while an enabled
+# one becomes '#define LIBMESH_HAVE_VTK 1'.  So the prefixed #define is the only
+# reliable signal, and "off" is its absence.  The [[:space:]] guard keeps
+# HAVE_EIGEN from being satisfied by HAVE_EIGEN_DENSE.
+assert_libmesh_features () {
+  local f="$1" label="$2" m bad=0
+  [ -f "${f}" ] || { echo "no ${f} to check (${label})" >&2; exit 1; }
+  for m in ${LIBMESH_FEATURES_ON}; do
+    grep -q "^#define LIBMESH_${m}[[:space:]]" "${f}" || {
+      echo "${label}: LIBMESH_${m} is NOT set, and this recipe asks for it." >&2
+      bad=1; }
+  done
+  for m in ${LIBMESH_FEATURES_OFF}; do
+    grep -q "^#define LIBMESH_${m}[[:space:]]" "${f}" && {
+      echo "${label}: LIBMESH_${m} IS set, and this recipe does not ask for it" >&2
+      echo "  -- something was found that we did not point configure at." >&2
+      bad=1; }
+  done
+  if [ "${bad}" != 0 ]; then
+    echo "--- what ${f} records about optional packages:" >&2
+    grep -E "^(#define LIBMESH_HAVE|/\* #undef HAVE)" "${f}" >&2
+    exit 1
+  fi
+  log "${label}: every required feature on, every required-absent one off"
+}
+
 cfg_h="include/libmesh_config.h"
-[ -f "${cfg_h}" ] || { echo "configure produced no ${cfg_h}" >&2; exit 1; }
-if grep -q '#define LIBMESH_HAVE_EXTERNAL_BOOST' "${cfg_h}"; then
-  echo "configure found an EXTERNAL Boost.  Either the host's leaked past" >&2
-  echo "--with-boost=\${STACK}, or this is a rebuild over a populated \${STACK}" >&2
-  echo "(A30) and the previous pass's bundled subset was taken for external." >&2
-  grep -n -i 'boost' "${cfg_h}" >&2; exit 1
-fi
+assert_libmesh_features "${cfg_h}" "configure's libmesh_config.h"
+
+# Boost, specifically, because #28 asserted the opposite of what is now correct.
+#
+# Before conda's libboost-headers was in the env, ANY external Boost meant the
+# host's had leaked past --with-boost (or a rebuild over a populated $STACK had
+# found the previous pass's own bundled subset -- A30).  Now an external Boost is
+# the intended outcome and its absence is the failure: it would mean the env lost
+# libboost-headers and libMesh fell back to its bundled 1.61 subset, silently
+# changing what the artifact contains.  HAVE_EXTERNAL_BOOST is in the ON list
+# above for that reason.
+#
+# WHERE it came from is not recorded in the header, and does not need to be:
+# --with-boost=<dir> makes ax_boost_base search <dir>/include and nothing else,
+# so an external Boost found at all was found in the stack -- and the path check
+# below reads the generated compile line to confirm nothing outside it appears.
 if [ -d "${src}/contrib/boost" ]; then
-  grep -q '#define LIBMESH_HAVE_BOOST 1' "${cfg_h}" \
-    || { echo "libMesh ships contrib/boost but configure did not select it:" >&2
-         grep -n -i 'boost' "${cfg_h}" >&2; exit 1; }
-  log "Boost: libMesh's bundled subset (contrib/boost), no external"
+  log "Boost: external, from the stack (this libMesh also bundles a subset, unused)"
 else
-  grep -q '#define LIBMESH_HAVE_BOOST 1' "${cfg_h}" \
-    && { echo "no contrib/boost in this libMesh, yet configure found a Boost:" >&2
-         grep -n -i 'boost' "${cfg_h}" >&2; exit 1; }
-  log "Boost: none (this libMesh has no bundled subset and the stack ships none)"
+  log "Boost: external, from the stack (this libMesh bundles none -- the env is the only source)"
 fi
+
 # The generic form of the same question, for every optional package at once:
 # nothing configure recorded may point outside the stack.  configure has just
 # substituted libmesh_optional_INCLUDES/LIBS into contrib/bin/libmesh-config
@@ -250,11 +375,21 @@ make install
     METHOD=opt "${STACK}/bin/timpi-config" --cppflags
   fi
 } | assert_no_host_paths "installed libmesh-config, libmesh*.pc, timpi-config"
+# The same two questions of the INSTALLED header, and of contrib/metaphysicl.
+#
+# metaphysicl's own hoisted BOOST_REQUIRE runs even with --with-vexcl=no, and
+# now that the stack holds a Boost it finds one -- so #28's assertion here
+# ("must record no Boost at all") is no longer the right question.  The right
+# one is the same one asked everywhere else: whatever it recorded, no path in it
+# may point outside the tree.
+assert_libmesh_features "${STACK}/include/libmesh/libmesh_config.h" \
+                        "installed libmesh_config.h"
 mp_h="${STACK}/include/metaphysicl/metaphysicl_config.h"
-if [ -f "${mp_h}" ] && grep -q -E '#define (METAPHYSICL_)?HAVE_BOOST[[:space:]]' "${mp_h}"; then
-  echo "contrib/metaphysicl recorded a Boost (its BOOST_REQUIRE runs even with" >&2
-  echo "--with-vexcl=no); --with-boost=\${STACK} should have kept it in the stack:" >&2
-  grep -n 'HAVE_BOOST' "${mp_h}" >&2; exit 1
+if [ -f "${mp_h}" ]; then
+  assert_no_host_paths "installed metaphysicl_config.h" < "${mp_h}"
+  grep -q -E '^#define (METAPHYSICL_)?HAVE_BOOST[[:space:]]' "${mp_h}" \
+    && log "contrib/metaphysicl: Boost, from the stack" \
+    || log "contrib/metaphysicl: no Boost recorded"
 fi
 
 remove_libtool_archives
