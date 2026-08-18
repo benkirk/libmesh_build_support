@@ -18,6 +18,9 @@ SMOKE_RANKS="${SMOKE_RANKS:-4}"
 SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/smoke" && pwd)"
 SMOKE_BIN="${STACK}/libexec/smoke"
 EX4_BIN="${STACK}/libexec/introduction_ex4"
+TRILINOS_SMOKE_BIN="${STACK}/libexec/trilinos_smoke"
+# Threads per rank for the Kokkos OpenMP backend.  See run_trilinos below.
+SMOKE_OMP_THREADS="${SMOKE_OMP_THREADS:-2}"
 # The extension point: any package -- including one from site/ -- that installs
 # an executable into $STACK/libexec/stack-tests/ gets run by this harness, in
 # place and again from the relocated tree, with no edit here.  A customer
@@ -61,15 +64,18 @@ fail () { echo "FAIL: $*" >&2; exit 1; }
 # launcher, yields N independent processes that each believe they are rank 0 of
 # 1 -- and all of them exit 0.  So require every rank id 0..N-1 to appear, and
 # require every rank to have reported the same size.
+# Parameterised over the output prefix so the Trilinos binary below is held to
+# exactly the same standard as smoke.c -- there is only one way for a binary in
+# this tree to prove it is really MPI-linked, and it should not be reimplemented.
 assert_ranks () {
-  local want="$1" out="$2" r seen
+  local tag="$1" want="$2" out="$3" r seen
   for (( r = 0; r < want; r++ )); do
-    grep -qx "smoke: rank ${r}/${want}" <<<"${out}" \
-      || fail "no 'rank ${r}/${want}' line -- ranks did not agree on the communicator size"
+    grep -qx "${tag}: rank ${r}/${want}" <<<"${out}" \
+      || fail "no '${tag} rank ${r}/${want}' line -- ranks did not agree on the communicator size"
   done
-  seen=$(grep -c '^smoke: rank ' <<<"${out}" || true)
-  [ "${seen}" -eq "${want}" ] || fail "expected ${want} rank lines, saw ${seen}"
-  grep -qx "smoke: ranks=${want}" <<<"${out}" || fail "missing 'ranks=${want}' summary"
+  seen=$(grep -c "^${tag}: rank " <<<"${out}" || true)
+  [ "${seen}" -eq "${want}" ] || fail "expected ${want} ${tag} rank lines, saw ${seen}"
+  grep -qx "${tag}: ranks=${want}" <<<"${out}" || fail "missing '${tag} ranks=${want}' summary"
 }
 
 run_serial () {
@@ -77,7 +83,7 @@ run_serial () {
   echo "--- serial"
   out=$("${SMOKE_BIN}") || fail "serial run exited non-zero"
   echo "${out}"
-  assert_ranks 1 "${out}"
+  assert_ranks smoke 1 "${out}"
 }
 
 run_parallel () {
@@ -86,7 +92,7 @@ run_parallel () {
   out=$("${MPIEXEC}" -n "${SMOKE_RANKS}" "${SMOKE_BIN}") \
     || fail "mpiexec -n ${SMOKE_RANKS} exited non-zero"
   echo "${out}"
-  assert_ranks "${SMOKE_RANKS}" "${out}"
+  assert_ranks smoke "${SMOKE_RANKS}" "${out}"
 }
 
 #------------------------------------------------------------------------------
@@ -192,6 +198,39 @@ check_libmesh_include_paths () {
 }
 
 #------------------------------------------------------------------------------
+# Trilinos: Epetra, Teuchos and (per profile) Kokkos, actually executed.
+#
+# Everything else in this harness exercises the PETSc/libMesh side.  The
+# Trilinos libraries shipped for a long time with nothing loading them at all,
+# so 'it resolves' was the only claim anyone could make about them -- and
+# resolving is not running.
+#
+# OMP_NUM_THREADS is pinned rather than inherited.  Kokkos' OpenMP backend
+# otherwise opens one thread per core on top of SMOKE_RANKS MPI ranks, which on
+# a 4-vCPU runner is a 16-way oversubscription that turns a smoke test into a
+# timeout.  Pinning it also makes the reported concurrency mean something.
+#
+# OMP_PROC_BIND=false is Kokkos' own recommendation, printed by Kokkos itself:
+# without it every initialize() emits a five-line WARNING about thread placement.
+# It is the right answer here rather than the quiet one -- 'spread'/'threads' is
+# advice for a production run that owns the node, and this is a correctness
+# check sharing a runner with three other MPI ranks.  Leaving the warning in
+# place would put five lines of noise in every CI log, on every rank, which is
+# how real output stops being read.
+run_trilinos () {
+  local label="$1" want="$2"; shift 2
+  local out
+  [ -x "${TRILINOS_SMOKE_BIN}" ] \
+    || { echo "--- trilinos_smoke skipped: not shipped in this stack"; return 0; }
+  echo "--- trilinos_smoke ${label}"
+  out=$( OMP_NUM_THREADS="${SMOKE_OMP_THREADS}" OMP_PROC_BIND=false \
+         "$@" "${TRILINOS_SMOKE_BIN}" 2>&1 ) \
+    || { echo "${out}" | tail -20; fail "trilinos_smoke exited non-zero"; }
+  echo "${out}" | sed 's/^/    /'
+  assert_ranks trilinos "${want}" "${out}"
+}
+
+#------------------------------------------------------------------------------
 # Extra executables from libexec/, run serially and under mpiexec.
 #
 # The assertion is deliberately weak -- exit 0, and something on stdout -- because
@@ -231,6 +270,8 @@ case "${MODE}" in
     run_parallel
     run_ex4 serial
     run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
+    run_trilinos serial 1
+    run_trilinos "on ${SMOKE_RANKS} ranks" "${SMOKE_RANKS}" "${MPIEXEC}" -n "${SMOKE_RANKS}"
     run_site_bins serial
     run_site_bins "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
     ;;
@@ -244,6 +285,8 @@ case "${MODE}" in
     run_parallel
     run_ex4 serial
     run_ex4 "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
+    run_trilinos serial 1
+    run_trilinos "on ${SMOKE_RANKS} ranks" "${SMOKE_RANKS}" "${MPIEXEC}" -n "${SMOKE_RANKS}"
     run_site_bins serial
     run_site_bins "on ${SMOKE_RANKS} ranks" "${MPIEXEC}" -n "${SMOKE_RANKS}"
 
