@@ -73,7 +73,19 @@ while IFS= read -r f; do
   {
     head -1 "$f"
     echo "${MARKER}"
-    echo "prefix=\"\$(cd \"\$(dirname \"\$(readlink -f \"\${BASH_SOURCE[0]:-\$0}\")\")/${rel}\" && pwd)\""
+    # ${BASH_SOURCE:-$0}, NOT ${BASH_SOURCE[0]:-$0}.  Fourteen of the twenty-two
+    # scripts rewritten here declare '#!/bin/sh', and on any Debian-family system
+    # that is dash, which has no arrays: the subscript makes it print
+    #
+    #     /path/to/stack/bin/libmesh-config: 3: Bad substitution
+    #
+    # and then, far worse, CONTINUE with an empty substitution -- so 'dirname ""'
+    # is '.', the prefix resolves against the CALLER's working directory, and
+    # every path the script emits is silently wrong.  Unsubscripted, bash still
+    # expands $BASH_SOURCE to element 0 (so sourcing keeps working) and dash sees
+    # a plain unset variable and falls back to $0.  Verified in dash, in bash
+    # executed, and in bash sourced.
+    echo "prefix=\"\$(cd \"\$(dirname \"\$(readlink -f \"\${BASH_SOURCE:-\$0}\")\")/${rel}\" && pwd)\""
     # Put our own bin/ on PATH from inside the wrapper.  mpicc invokes the
     # compiler by bare name -- 'aarch64-conda-linux-gnu-cc' -- so without this
     # it fails with a bare "command not found" naming a compiler the user has

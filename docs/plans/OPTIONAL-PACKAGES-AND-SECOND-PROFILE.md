@@ -21,9 +21,18 @@ someone runs, not the newest of everything).
 Measured on `linux-aarch64` while the optional-package work was in flight, so
 the two known risks are already retired:
 
-- **PETSc 3.23.7 builds** with the recipe's v0 option set unchanged —
-  `--download-spooles/ml/suitesparse/superlu/scalapack/hypre`, `--with-x=0`,
-  conda's OpenBLAS. `make petsc` exit 0.
+- **PETSc 3.23.7 builds**, with one addition to the recipe's v0 option set.
+  3.23 downloads a SuiteSparse whose CHOLMOD builds demo programs under
+  `BUILD_TESTING` (its own `SUITESPARSE_DEMOS` defaults OFF, but the CMake gate
+  is `SUITESPARSE_DEMOS OR BUILD_TESTING`), and linking `cholmod_di_demo` fails
+  for want of an `-rpath-link` to `libopenblas.so.0`. The fix is
+  `--download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF`: the libraries
+  the stack installs were never affected, and nothing here wanted the demos
+  built.
+
+  Recorded because the first reading of this measurement was wrong — the run was
+  called green when only the shell wrapper around it had exited 0, and both
+  attempts had in fact failed identically.
 - **Trilinos 16-1-0 builds** with the recipe unchanged, including
   `-DTrilinos_ENABLE_Kokkos=OFF`. `profiles/README.md` carries a v0-era
   prediction that this flag "is not expected to survive a version bump"; it
