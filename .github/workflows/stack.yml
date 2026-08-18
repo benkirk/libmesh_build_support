@@ -461,6 +461,18 @@ jobs:
           -e SITE_DIRS='${{ inputs.site_dirs }}'
           build make build
 
+      # Immediately after 'make build' and deliberately BEFORE the devel image
+      # is published: that image's entire selling point is "drop a package into
+      # site/ and build it", and this is the step that proves the environment
+      # it ships can do that.  A failure here should stop the publish rather
+      # than ship an image whose shell cannot compile against its own stack.
+      #
+      # Cheap -- one libMesh example -- and it has to run here, while the
+      # toolchain is still in the tree; relocate strips and prune removes it.
+      - name: make shell-check
+        working-directory: docker
+        run: docker compose run --rm -T build make shell-check
+
       # The one that earns its keep: toolchain plus built stack, before
       # relocate strips it, slim trims it and prune removes binutils.  A
       # consumer pulls this, drops a package into site/, and 'make build' skips

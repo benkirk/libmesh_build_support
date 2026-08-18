@@ -101,6 +101,26 @@ activate_toolchain () {
   # $ORIGIN mangling at configure time is not worth it.
   # ${LDFLAGS:-}/${CPPFLAGS:-} here are what activate.d just set, not the
   # inherited values -- those were scrubbed above.
+  #
+  # Deliberately NOT adding -Wl,-rpath-link here, though four places in this
+  # repo pass it by hand and centralising it looks like the obvious cleanup.
+  # Measured: the activate.d scripts sourced just above already export it.
+  # activate-gcc_<platform>.sh sets
+  #
+  #   LDFLAGS=... -Wl,-rpath,${CONDA_PREFIX}/lib -Wl,-rpath-link,${CONDA_PREFIX}/lib ...
+  #
+  # and CONDA_PREFIX is $STACK.  Adding our own would duplicate the flag, and
+  # would imply this function is where that guarantee lives.  It is not.
+  #
+  # Which is exactly why the hand-written copies exist.  A package build gets
+  # -rpath-link from conda and links '-lpetsc' happily.  A CONSUMER of the
+  # shipped tree gets no activate.d at all, and neither libmesh-config nor the
+  # .pc files emit it, so the same link fails on 'undefined reference to
+  # HYPRE_AMSSetDimension' and 'dstev_' while ldd reports libpetsc.so fully
+  # resolved -- ld uses neither -L nor -rpath to resolve a linked library's own
+  # DT_NEEDED entries, only -rpath-link.  Measured on linux-aarch64, 2026-08-18,
+  # in both directions.  lib/shell-check.sh gates the first case;
+  # docs/EXTENDING.md warns about the second.
   export LDFLAGS="-L${STACK}/lib -Wl,-rpath,${STACK}/lib ${LDFLAGS:-}"
   export CPPFLAGS="-I${STACK}/include ${CPPFLAGS:-}"
   export PKG_CONFIG_PATH="${STACK}/lib/pkgconfig"
