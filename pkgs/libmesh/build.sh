@@ -306,7 +306,18 @@ fi
 # cross-check that git's header really is right.  Only the missing-file case is
 # mode-dependent: a tarball build has no other source of truth and must stop,
 # while a checkout does, so assert against that instead of failing.
-gen="contrib/netcdf/v4/include/netcdf_meta.h"
+# The directory name is discovered, not hard-coded.  1.7.x calls it
+# contrib/netcdf/v4 (a real directory in the tarball, a symlink to
+# netcdf-c-4.6.2 in git); 1.8.4 dropped the alias and ships
+# contrib/netcdf/netcdf-c-4.6.2 alone, which stopped this block with the message
+# below rather than silently skipping the repair -- the assertion working, one
+# profile before anyone would have noticed the ExodusII writes failing.  Glob for
+# whichever it is, in the build tree first because that is the copy configure
+# just generated.
+gen="$(cd "${bdir}" && ls contrib/netcdf/*/include/netcdf_meta.h 2>/dev/null | head -1)"
+[ -n "${gen}" ] || gen="$(cd "${src}" && ls contrib/netcdf/*/include/netcdf_meta.h 2>/dev/null | head -1)"
+[ -n "${gen}" ] || { echo "no netcdf_meta.h anywhere under contrib/netcdf; libMesh's contrib layout changed" >&2
+                     ls -d "${src}"/contrib/netcdf/*/ >&2; exit 1; }
 if [ -f "${gen}" ]; then
   grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${gen}" \
     || { echo "generated netcdf_meta.h reports no HDF5 support:" >&2
@@ -321,7 +332,9 @@ elif [ "${PKG_SOURCE}" = git ]; then
          grep NC_HAS_HDF5 "${src}/${gen}" >&2; exit 1; }
   log "no generated header; git checkout's own is already correct (A29)"
 else
-  echo "no generated ${gen}; libMesh's contrib layout changed" >&2; exit 1
+  echo "no generated ${gen}, and this is a tarball build, which has no other" >&2
+  echo "source of truth for whether netcdf was configured with HDF5 (A29)." >&2
+  exit 1
 fi
 
 #------------------------------------------------------------------------------
