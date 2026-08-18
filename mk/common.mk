@@ -24,6 +24,15 @@ RPATH_MODE      ?= rpath
 # what every artifact this stack has shipped); 'auto' passes nothing and lets
 # Trilinos' own defaults decide, which is what a customer building it by hand
 # gets.
+#
+# TRILINOS_OPENMP is assigned the same way and for the same reason.  'on' passes
+# -DTrilinos_ENABLE_OpenMP=ON, which is what actually turns Kokkos' OpenMP
+# backend on: -DKokkos_ENABLE_OPENMP=ON does NOT, because Trilinos' own
+# packages/kokkos/cmake/kokkos_configure_trilinos.cmake re-sets that variable
+# with FORCE from Trilinos_ENABLE_OpenMP and would silently overwrite it.  The
+# flag is project-wide -- Teuchos and Epetra are compiled differently too, and
+# their binaries measurably move -- so this is not a Kokkos-only switch and is
+# deliberately not folded into TRILINOS_KOKKOS.
 # Instruction-set floor for the shipped binaries.  See amendment A21.
 #
 # x86-64-v2 is SSE4.2+popcnt, Nehalem/2009 and later -- the level RHEL 9 itself
@@ -106,6 +115,7 @@ PKG_ENV = \
   ISA_BASELINE='$(ISA_BASELINE)' \
   USE_WRAPPERS='$(USE_WRAPPERS)' \
   TRILINOS_KOKKOS='$(TRILINOS_KOKKOS)' \
+  TRILINOS_OPENMP='$(TRILINOS_OPENMP)' \
   PROFILE='$(PROFILE)' \
   PETSC_VERSION='$(PETSC_VERSION)' \
   LIBMESH_VERSION='$(LIBMESH_VERSION)' \

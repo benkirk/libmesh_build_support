@@ -6,3 +6,6 @@ TRILINOS_VERSION ?= 13-4-1
 
 # As 'default': v0's answer, unchanged.  See mk/common.mk.
 TRILINOS_KOKKOS  ?= off
+
+# As 'default'.  See mk/common.mk.
+TRILINOS_OPENMP  ?= off

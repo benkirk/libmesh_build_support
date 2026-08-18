@@ -75,7 +75,8 @@ or `make clean`, when changing *what* is built (`DESIGN.md`, constraints).
 
 Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
 `TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `ISA_BASELINE`,
-`USE_WRAPPERS`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
+`USE_WRAPPERS`, `PROFILE`, the version pins, `TRILINOS_KOKKOS`,
+`TRILINOS_OPENMP`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
 `PKG_DIR` / `PKG_SOURCE` / `PKG_GIT_URL` / `PKG_GIT_REF`.
 
 Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
