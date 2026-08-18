@@ -39,6 +39,9 @@ set -euo pipefail
 : "${HDF5_PARALLEL:?}"
 : "${GLIBC_FLOOR:?}"
 : "${GCC_VERSION:?}"
+# Not ':?': a caller that predates profiles, or one building the default set,
+# should not have to say so.
+: "${PROFILE:=default}"
 
 hash_stdin() { sha256sum | cut -d' ' -f1; }
 
@@ -61,8 +64,15 @@ config="$(printf '%s\n' \
 conda_files="$(hash_paths conda/bootstrap.sh conda/env conda/lock conda/prune.list)"
 build_files="$(hash_paths pkgs wrappers mk profiles hooks Makefile)"
 
+# PROFILE belongs to the BUILD half only, and that asymmetry is the point.
+# Hashing the contents of profiles/ says which version sets exist; it does not
+# say which one was selected, so without this two profiles compute the same
+# SHA_BUILD and publish over each other.  It must NOT reach SHA_CONDA: the
+# toolchain image is profile-independent -- one env builds every profile -- and
+# folding it in there would fragment the builder image for no reason.
 sha_conda="$(printf '%s\n%s\n' "${config}" "${conda_files}" | hash_stdin)"
-sha_build="$(printf '%s\n%s\n' "${sha_conda}" "${build_files}" | hash_stdin)"
+sha_build="$(printf '%s\n%s\n%s\n' "${sha_conda}" "${build_files}" \
+             "profile=${PROFILE}" | hash_stdin)"
 
 printf 'SHA_CONDA=%s\n' "${sha_conda:0:7}"
 printf 'SHA_BUILD=%s\n' "${sha_build:0:7}"

@@ -15,6 +15,15 @@ MPI_VERSION     ?= 5.0.1
 HDF5_VERSION    ?= 1.14
 HDF5_PARALLEL   ?= no
 RPATH_MODE      ?= rpath
+# TRILINOS_KOKKOS is deliberately NOT defaulted here.  This file is included
+# BEFORE profiles/$(PROFILE).mk, so a '?=' here would win over the profile's own
+# and the setting would silently stop being per-profile -- the same trap
+# declare_pkg documents below.  It is assigned in every profiles/*.mk, exactly
+# as the version pins are, and pkgs/trilinos/build.sh treats an empty value as
+# 'off'.  Values: 'off' passes -DTrilinos_ENABLE_Kokkos=OFF (v0's answer, and
+# what every artifact this stack has shipped); 'auto' passes nothing and lets
+# Trilinos' own defaults decide, which is what a customer building it by hand
+# gets.
 # Instruction-set floor for the shipped binaries.  See amendment A21.
 #
 # x86-64-v2 is SSE4.2+popcnt, Nehalem/2009 and later -- the level RHEL 9 itself
@@ -96,6 +105,11 @@ PKG_ENV = \
   RPATH_MODE='$(RPATH_MODE)' \
   ISA_BASELINE='$(ISA_BASELINE)' \
   USE_WRAPPERS='$(USE_WRAPPERS)' \
+  TRILINOS_KOKKOS='$(TRILINOS_KOKKOS)' \
+  PROFILE='$(PROFILE)' \
+  PETSC_VERSION='$(PETSC_VERSION)' \
+  LIBMESH_VERSION='$(LIBMESH_VERSION)' \
+  TRILINOS_VERSION='$(TRILINOS_VERSION)' \
   TOPDIR='$(CURDIR)'
 
 #-------------------------------------------------------------------------------

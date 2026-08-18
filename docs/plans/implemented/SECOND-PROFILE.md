@@ -1,8 +1,15 @@
 # Plan: a second PETSc / libMesh / Trilinos pairing, built in CI
 
-**Status: not started.** What remains of the handoff from #28 after the
-optional-package half landed —
-[`implemented/OPTIONAL-PACKAGES-FROM-THE-ENV.md`](implemented/OPTIONAL-PACKAGES-FROM-THE-ENV.md).
+**Status: implemented.** The pins and the Kokkos knob are in `profiles/*.mk` and
+`pkgs/trilinos/build.sh`; `PROFILE` runs through `docker/compose.yaml`,
+`stack.yml`, `docker/pull-shell.sh` and `.github/scripts/inputs-sha.sh`; the
+manifest records the pairing (`relocate/validate.sh`); `ci.yml` builds both
+profiles on both platforms. Measured results are in **Evidence** at the end.
+
+Completes the handoff from #28, whose other half is
+[`OPTIONAL-PACKAGES-FROM-THE-ENV.md`](OPTIONAL-PACKAGES-FROM-THE-ENV.md).
+**What follows is the plan as written before the work**, apart from the
+Evidence section.
 
 ## Goal
 
@@ -25,14 +32,14 @@ the two known risks are already retired:
   3.23 downloads a SuiteSparse whose CHOLMOD builds demo programs under
   `BUILD_TESTING` (its own `SUITESPARSE_DEMOS` defaults OFF, but the CMake gate
   is `SUITESPARSE_DEMOS OR BUILD_TESTING`), and linking `cholmod_di_demo` fails
-  for want of an `-rpath-link` to `libopenblas.so.0`. The fix is
-  `--download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF`: the libraries
-  the stack installs were never affected, and nothing here wanted the demos
-  built.
+  for want of an `-rpath-link` to `libopenblas.so.0`. `pkgs/petsc/build.sh`
+  passes `--download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF`: the
+  libraries the stack installs were never affected, and nothing here wanted the
+  demos built. A no-op for the older SuiteSparse 3.20.5 downloads.
 
-  Recorded because the first reading of this measurement was wrong — the run was
-  called green when only the shell wrapper around it had exited 0, and both
-  attempts had in fact failed identically.
+  Recorded because the first reading of this measurement was wrong: the run was
+  called green when only the shell wrapper around it had exited 0. Both attempts
+  had failed identically.
 - **Trilinos 16-1-0 builds** with the recipe unchanged, including
   `-DTrilinos_ENABLE_Kokkos=OFF`. `profiles/README.md` carries a v0-era
   prediction that this flag "is not expected to survive a version bump"; it
@@ -113,3 +120,60 @@ Renaming the profiles (`stable` → `legacy`, `default` → `stable`, `bleeding`
 the new pairing is proven, and it changes what every per-PR job defends, so it
 is its own PR: a `git mv` plus a sweep of `README.md`, `docs/DESIGN.md`,
 `docs/CI.md`, `config.mk.example` and `profiles/README.md`.
+
+## Evidence
+
+`linux-aarch64`, native Docker, fresh build root. `PROFILE=bleeding make all`
+green end to end, `distcheck OK` including the unpack under a path with a space.
+
+Four findings, each caught by a check rather than by a compile error:
+
+1. **PETSc 3.23.7 needed one flag.** 3.23 downloads a SuiteSparse whose CHOLMOD
+   builds demo programs under `BUILD_TESTING` (its own `SUITESPARSE_DEMOS`
+   defaults OFF, but the gate is `SUITESPARSE_DEMOS OR BUILD_TESTING`), and
+   linking `cholmod_di_demo` dies for want of an `-rpath-link` to
+   `libopenblas.so.0`. `--download-suitesparse-cmake-arguments=-DBUILD_TESTING=OFF`.
+   The first report of this measurement was wrong — the run was called green by
+   reading the shell wrapper's exit code instead of PETSc's, and both attempts
+   had failed identically.
+2. **libMesh 1.8.4 renamed `contrib/netcdf/v4`** to `contrib/netcdf/netcdf-c-4.6.2`.
+   The A29 `netcdf_meta.h` repair named the old path and stopped the build.
+   Without the assertion the repair would have been skipped silently and every
+   ExodusII write in this profile would have failed at run time — the exact
+   failure A29 exists to prevent.
+3. **libMesh removed the HDF5 C++ probe** after 1.7.x: neither 1.8's nor devel's
+   `m4/hdf5.m4` mentions `HDF5_CXX`, so `HAVE_HDF5_CXX` is required only where
+   the source can define it. The first version of that probe matched the
+   leftover `$HDF5_CXXLIBS` consumer line that 1.8.4 still carries, so it asks
+   for the exact macro name: `HAVE_HDF5_CXX` appears 0 times in 1.8.4's
+   `configure` and once in 1.7.9's.
+4. **`Kokkos=auto` enables Kokkos**, as intended: `Final set of enabled
+   top-level packages: Kokkos Teuchos Sacado Epetra Pliris`.
+
+Both XDR roads are now exercised by CI: 1.7.9 has no `--with-xdr-include` and
+goes through `CPPFLAGS`; 1.8.4 takes the flag and exports the path in
+`libmesh_optional_INCLUDES`.
+
+| | default (1.7.9) | bleeding (1.8.4) |
+|---|---|---|
+| tarball | 129.3 MB | 139.1 MB |
+| conda packages | 63 | 63 — the same env, which is the point |
+| `stack/lib/*.so` | 144 | 152 (`libkokkoscore`, `libkokkoscontainers`, `libkokkossimd`) |
+| validate | 0 failures | 0 failures, all 349 objects within `armv8.1-a` |
+
+Kokkos brought no `-march=native` and nothing above the ISA baseline.
+
+**The default profile is unmoved by any of this**, which the SuiteSparse commit
+promised and this measures: a default build on this branch against the one from
+before it has **identical file lists**, and the only difference in the contract
+files is the intended `${BASH_SOURCE:-$0}` fix from #29. Tarballs differ by
+4,428 bytes, which is that line across the fourteen rewritten `#!/bin/sh`
+scripts plus gzip variance.
+
+Content hashes, as designed — one toolchain image, one `devel` image per
+profile:
+
+```
+default   SHA_CONDA=ecd96f0  SHA_BUILD=f40c8b8
+bleeding  SHA_CONDA=ecd96f0  SHA_BUILD=cbdd5f8
+```

@@ -306,7 +306,18 @@ fi
 # cross-check that git's header really is right.  Only the missing-file case is
 # mode-dependent: a tarball build has no other source of truth and must stop,
 # while a checkout does, so assert against that instead of failing.
-gen="contrib/netcdf/v4/include/netcdf_meta.h"
+# The directory name is discovered, not hard-coded.  1.7.x calls it
+# contrib/netcdf/v4 (a real directory in the tarball, a symlink to
+# netcdf-c-4.6.2 in git); 1.8.4 dropped the alias and ships
+# contrib/netcdf/netcdf-c-4.6.2 alone, which stopped this block with the message
+# below rather than silently skipping the repair -- the assertion working, one
+# profile before anyone would have noticed the ExodusII writes failing.  Glob for
+# whichever it is, in the build tree first because that is the copy configure
+# just generated.
+gen="$(cd "${bdir}" && ls contrib/netcdf/*/include/netcdf_meta.h 2>/dev/null | head -1)"
+[ -n "${gen}" ] || gen="$(cd "${src}" && ls contrib/netcdf/*/include/netcdf_meta.h 2>/dev/null | head -1)"
+[ -n "${gen}" ] || { echo "no netcdf_meta.h anywhere under contrib/netcdf; libMesh's contrib layout changed" >&2
+                     ls -d "${src}"/contrib/netcdf/*/ >&2; exit 1; }
 if [ -f "${gen}" ]; then
   grep -q '#define NC_HAS_HDF5[[:space:]]*1' "${gen}" \
     || { echo "generated netcdf_meta.h reports no HDF5 support:" >&2
@@ -321,7 +332,9 @@ elif [ "${PKG_SOURCE}" = git ]; then
          grep NC_HAS_HDF5 "${src}/${gen}" >&2; exit 1; }
   log "no generated header; git checkout's own is already correct (A29)"
 else
-  echo "no generated ${gen}; libMesh's contrib layout changed" >&2; exit 1
+  echo "no generated ${gen}, and this is a tarball build, which has no other" >&2
+  echo "source of truth for whether netcdf was configured with HDF5 (A29)." >&2
+  exit 1
 fi
 
 #------------------------------------------------------------------------------
@@ -340,8 +353,22 @@ fi
 # search that reaches into /usr, so "off" here means "off on purpose", and a
 # name appearing in that column later is how we learn a build host was consulted.
 LIBMESH_FEATURES_ON="HAVE_BOOST HAVE_EXTERNAL_BOOST HAVE_EIGEN HAVE_EIGEN_DENSE
-  HAVE_EIGEN_SPARSE HAVE_XDR HAVE_HDF5 HAVE_HDF5_CXX HAVE_NETCDF HAVE_EXODUS_API
+  HAVE_EIGEN_SPARSE HAVE_XDR HAVE_HDF5 HAVE_NETCDF HAVE_EXODUS_API
   HAVE_TECPLOT_API HAVE_GLPK HAVE_METAPHYSICL HAVE_PETSC HAVE_TRIANGLE"
+
+# HAVE_HDF5_CXX is required only where libMesh still looks for it.  1.7.x probes
+# for the HDF5 C++ interface and links -lhdf5_cpp; 1.8 and devel removed that
+# from m4/hdf5.m4 entirely -- the macro is not "off" there, it does not exist --
+# so demanding it unconditionally fails a build for a feature upstream deleted.
+# Asked of the source, like the XDR flag below, rather than of the version -- and
+# asked with the EXACT macro name, because 1.8.4 still carries the line that
+# consumes $HDF5_CXXLIBS while having deleted the probe that fills it.  Matching
+# the looser 'HDF5_CXX' hit that leftover and demanded a macro nothing could
+# define: 'HAVE_HDF5_CXX' appears 0 times in 1.8.4's configure and once in
+# 1.7.9's.
+if grep -q 'HAVE_HDF5_CXX' "${src}/configure"; then
+  LIBMESH_FEATURES_ON="${LIBMESH_FEATURES_ON} HAVE_HDF5_CXX"
+fi
 LIBMESH_FEATURES_OFF="HAVE_NLOPT HAVE_VTK HAVE_TRILINOS HAVE_CURL HAVE_CAPNPROTO
   HAVE_SLEPC"
 

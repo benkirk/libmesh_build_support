@@ -10,7 +10,7 @@ in [`plans/implemented/RELOCATABLE-STACK-PLAN.md`](plans/implemented/RELOCATABLE
 | workflow | trigger | what it answers |
 |---|---|---|
 | `checks.yml` | pushes to `main`, every PR, on demand | the fast gate: does it parse, lint, order itself, do the ISA regexes still match, does every base image build, do the docs' links resolve — about two minutes |
-| `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | the default configuration on `linux-64` **and** `linux-aarch64`, verified on all five base images; on `main` it also publishes the builder and devel images |
+| `ci.yml` | PRs and `main` (not `**.md`, `docs/**`) | two version profiles × `linux-64` and `linux-aarch64`. `default` verifies on all five base images; `bleeding` on two and `experimental: true` until it has been green a while. On `main` it also publishes the builder and devel images |
 | `stack.yml` | called, never triggered | the reusable build-and-verify implementation, parameterized |
 | `extended.yml` | Mondays 06:17 UTC, and on demand | the knobs nobody runs daily: fresh conda solve, MKL, parallel HDF5, libMesh from git, a Debian-family builder, the `customer_demo` branch |
 | `customer-demo.yml` | push to `main`, nightly | rebases the `customer_demo` branch onto `main`, verifies it, force-pushes with lease — the one workflow with `contents: write` |
@@ -45,6 +45,13 @@ Four decisions behind that shape:
 - **The fast gate is separate from the expensive one.** Most mistakes here are
   catchable in two minutes without building anything; A1 was that class of
   break, and `make -n all` under `-j8` is what catches it.
+- **A second profile is a second thing to compile, not a second thing to
+  resolve.** `bleeding` (PETSc 3.23.7 / libMesh 1.8.4 / Trilinos 16-1-0) builds
+  from the same conda env as `default`: `cmake<4` is above Trilinos 16's floor
+  and `python<3.13` is fine for PETSc 3.23, and both are pruned build tools
+  anyway. So `PROFILE` is part of `SHA_BUILD` and deliberately not part of
+  `SHA_CONDA` — one builder image serves both profiles, and only the `devel`
+  image is per-profile.
 - **`ci.yml` builds from the checked-in lock where one exists; `extended.yml`'s
   `fresh-solve` solves from the spec.** A lock can never report that `conda/env/*.yml` has
   stopped resolving to something that works, so `fresh-solve` ignores it weekly
@@ -87,7 +94,7 @@ SIGINT as "stop this container"; the default TERM would orphan it.
 
 | name | contents |
 |---|---|
-| `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz` |
+| `stack-<platform>-<blas>-<mpi>-hdf5<yes/no>[-<profile>][-libmeshgit]-<base>` | the tarball, `dist/*.tar.gz`. Only a non-default profile appears, so existing names did not move |
 | `…-diagnostics` | `logs/<pkg>.log`, `relocate/{before,after}.json`, `relocate/isa-scan.json`, `relocate/fixup-report.txt`, `lock/` (the checked-in locks, overwritten by the fresh solve when `refresh_lock` ran), `df.txt` |
 | `result-build-…`, `result-verify-…-<base>` | one JSON per job, for `summarise` |
 

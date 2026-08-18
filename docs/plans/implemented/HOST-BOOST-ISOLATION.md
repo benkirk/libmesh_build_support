@@ -206,5 +206,6 @@ files" = `include/libmesh/libmesh_config.h`, `include/metaphysicl/metaphysicl_co
   green — the same job that was red pre-fix. `ci.yml` on the branch: both
   platforms and all five verify images green.
 
-Follow-on (Boost/Eigen/tirpc from the env, a second profile):
-[`../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md`](../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md).
+Follow-on, both since implemented: Boost/Eigen/tirpc from the env in
+[`OPTIONAL-PACKAGES-FROM-THE-ENV.md`](OPTIONAL-PACKAGES-FROM-THE-ENV.md), the
+second profile in [`SECOND-PROFILE.md`](SECOND-PROFILE.md).

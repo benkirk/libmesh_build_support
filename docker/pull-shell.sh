@@ -26,7 +26,7 @@
 # Config knobs (same names and defaults as docker/compose.yaml's local loop, so
 # the image you pull matches the one you would build here):
 #   STAGE BASE_IMAGE TARGET_PLATFORM BLAS_PROVIDER MPI_FAMILY
-#   HDF5_PARALLEL GLIBC_FLOOR GCC_VERSION PLATFORM
+#   HDF5_PARALLEL GLIBC_FLOOR GCC_VERSION PLATFORM PROFILE
 #
 # Overrides for where the images live:
 #   REGISTRY  default ghcr.io
@@ -54,6 +54,7 @@ export MPI_FAMILY="${MPI_FAMILY:-mpich}"
 export HDF5_PARALLEL="${HDF5_PARALLEL:-no}"
 export GLIBC_FLOOR="${GLIBC_FLOOR:-2.28}"
 export GCC_VERSION="${GCC_VERSION:-14}"
+export PROFILE="${PROFILE:-default}"
 
 if [ -n "${TAG:-}" ]; then
   ref="${TAG}"
@@ -73,7 +74,12 @@ else
   eval "$(.github/scripts/inputs-sha.sh)"
   if [ "${STAGE}" = builder ]; then sha="${SHA_CONDA}"; else sha="${SHA_BUILD}"; fi
 
-  tag="${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}-${sha}"
+  # The profile appears in the tag only when it is not the default one, so
+  # every image published before profiles existed keeps the name it has.  Same
+  # rule stack.yml's Names step follows for the artifact.
+  prof=""
+  if [ "${STAGE}" = devel ] && [ "${PROFILE}" != default ]; then prof="-${PROFILE}"; fi
+  tag="${TARGET_PLATFORM}-${BLAS_PROVIDER}-${MPI_FAMILY}${prof}-${sha}"
   ref="${REGISTRY}/${REPO}/${STAGE}:${tag}"
 fi
 

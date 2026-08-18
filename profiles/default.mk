@@ -23,3 +23,8 @@ PETSC_VERSION    ?= 3.20.5
 # matrix exercises; the git path is opt-in and weekly.
 LIBMESH_VERSION  ?= 1.7.9
 TRILINOS_VERSION ?= 14-4-0
+
+# Kokkos stays off here: it is what v0 shipped and what every artifact this
+# stack has ever produced contains.  'bleeding' is where the other answer is
+# measured.  See mk/common.mk.
+TRILINOS_KOKKOS  ?= off

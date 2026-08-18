@@ -44,6 +44,10 @@ x-common: &common
     CONDA_PKGS_DIRS: /cache/conda-pkgs
     SRC_CACHE: /cache/src
     DIST_DIR: /src/dist
+    # Which version set gets built.  Not a knob the local loop usually touches,
+    # but it has to be here for the same reason the others are: CI sets it in
+    # the environment and this file is the one that carries it in.
+    PROFILE: ${PROFILE:-default}
     TARGET_PLATFORM: ${TARGET_PLATFORM:-linux-aarch64}
     BLAS_PROVIDER: ${BLAS_PROVIDER:-openblas}
     MPI_FAMILY: ${MPI_FAMILY:-mpich}
