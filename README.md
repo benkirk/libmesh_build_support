@@ -92,7 +92,7 @@ Set in `config.mk` (copy `config.mk.example`) or on the command line.
 | `MPI_FAMILY` | `mpich` | `openmpi` is not supported yet — prerequisites in `docs/CI.md` |
 | `GLIBC_FLOOR` | `2.28` | the conda sysroot pin; the tarball name carries it |
 | `ISA_BASELINE_X86` / `_AARCH64` | `x86-64-v2` / `armv8.1-a` | a cap the compiler wrappers enforce and the ISA scan gates |
-| `PROFILE` | `default` | version set, `profiles/` |
+| `PROFILE` | `default` | version set, `profiles/`. `bleeding` is PETSc 3.23.7 / libMesh 1.8.4 / Trilinos 16-1-0 and is built by CI too |
 | `SHIP_PYTHON` | `no` | keep the python stack in the artifact |
 | `LIBMESH_SOURCE` | `tarball` | `git` clones and bootstraps `LIBMESH_GIT_REF` |
 
