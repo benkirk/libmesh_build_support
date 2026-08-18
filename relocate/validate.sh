@@ -150,6 +150,78 @@ elif [ -f "${ex4mk}" ] && command -v make >/dev/null 2>&1; then
 fi
 
 #------------------------------------------------------------------------------
+# The shipped CMake package configs must RESOLVE, not merely stop naming the
+# build prefix -- the same question the LIBMESH_DIR probe above asks of the make
+# fragments, asked of the 500-odd .cmake files.
+#
+# This is not hypothetical symmetry.  The LIBMESH_DIR bug was exactly this: the
+# prefix string was gone, the residue scan was satisfied, and every path
+# resolved to "/opt".  fixup-text.sh rewrites the CMake configs with the same
+# class of expression, and until now nothing evaluated one -- there is no
+# consumer of Trilinos_INCLUDE_DIRS anywhere in this repo, so a config that
+# resolved to nonsense would ship silently.
+#
+# Done textually rather than by running cmake, because cmake is on
+# conda/prune.list and the builder image has none either: at --stage final, and
+# inside distcheck, there is no cmake anywhere.  The rewrite fixup-text.sh
+# performs is a fixed shape --
+#   get_filename_component(__stack_prefix_N "${CMAKE_CURRENT_LIST_DIR}/<rel>" REALPATH)
+# -- so resolving it needs only the file's own directory, which is what cmake
+# would have done with it.  Checking a path EXISTS is the part that has teeth;
+# "/opt" does not.
+# Full mode only: this needs an interpreter, and --runtime deliberately has
+# none.  The verify image is where "no python" is a feature, not a gap.
+cmcfg_checked=0 cmcfg_bad=0
+cmcfg_py="${CONDA_HOME:-}/bin/python"
+[ -x "${cmcfg_py}" ] || cmcfg_py="$(command -v python3 || true)"
+[ "${MODE}" = full ] && [ -x "${cmcfg_py}" ] || cmcfg_py=""
+while [ -n "${cmcfg_py}" ] && IFS= read -r cfg; do
+  [ -f "${cfg}" ] || continue
+  eval "$(PY_CFG="${cfg}" PY_ROOT="${ROOT}" "${cmcfg_py}" - <<'CMPY' 2>/dev/null || echo "CM_N=0 CM_BAD=0 CM_SAMPLE=''"
+import os, re, sys
+cfg, root = os.environ["PY_CFG"], os.environ["PY_ROOT"]
+here = os.path.dirname(cfg)
+text = open(cfg, errors="replace").read()
+# The preamble fixup-text.sh injects, and the directory it resolves to.
+prefixes = {}
+for m in re.finditer(r'get_filename_component\((__stack_prefix_\d+)\s+"\$\{CMAKE_CURRENT_LIST_DIR\}/([^"]*)"\s+REALPATH\)', text):
+    prefixes[m.group(1)] = os.path.realpath(os.path.join(here, m.group(2)))
+bad, n = [], 0
+# Only the variables a consumer actually dereferences to reach the tree.
+for m in re.finditer(r'set\((\w*(?:INCLUDE_DIRS|LIBRARY_DIRS|_COMPILER|INSTALL_DIR))\s+"([^"]*)"\)', text):
+    name, val = m.group(1), m.group(2)
+    for k, v in prefixes.items():
+        val = val.replace("${%s}" % k, v)
+    if "${" in val or not val:
+        continue
+    for path in val.split(";"):
+        path = path.strip()
+        if not path or not path.startswith("/"):
+            continue
+        n += 1
+        if not os.path.exists(path):
+            bad.append(f"{name}={path}")
+print("CM_N=%d" % n)
+print("CM_BAD=%d" % len(bad))
+print("CM_SAMPLE=%s" % repr("; ".join(bad[:3])))
+CMPY
+)"
+  cmcfg_checked=$((cmcfg_checked + ${CM_N:-0}))
+  if [ "${CM_BAD:-0}" -gt 0 ]; then
+    cmcfg_bad=$((cmcfg_bad + CM_BAD))
+    echo "          ${cfg#"${ROOT}"/}: ${CM_SAMPLE}"
+  fi
+done < <(find "${ROOT}/lib/cmake" -maxdepth 2 -name '*Config.cmake' -type f 2>/dev/null)
+
+if [ "${cmcfg_checked}" -eq 0 ]; then
+  : # no CMake package configs in this tree (or no python); nothing to assert
+elif [ "${cmcfg_bad}" -eq 0 ]; then
+  ok "${cmcfg_checked} path(s) from the shipped CMake configs resolve inside the tree"
+else
+  bad "${cmcfg_bad} path(s) named by a shipped CMake config do not exist"
+fi
+
+#------------------------------------------------------------------------------
 # Embedded build-prefix residue.
 #
 # Scans binary files too.  'grep -rI' skips them, which is exactly how a prefix
@@ -391,6 +463,7 @@ man = {
         ) if v
     },
     "trilinos_kokkos": os.environ.get("TRILINOS_KOKKOS"),
+    "trilinos_openmp": os.environ.get("TRILINOS_OPENMP"),
     "blas_provider": os.environ.get("BLAS_PROVIDER"),
     "mpi_family": os.environ.get("MPI_FAMILY"),
     "mpi_provider": os.environ.get("MPI_PROVIDER"),
