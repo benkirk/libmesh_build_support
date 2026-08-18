@@ -180,7 +180,7 @@ done
 # not by parsing PKG_VERSION: PKG_SOURCE=git can be any ref at all, and the flag
 # either exists in that source or it does not.
 #------------------------------------------------------------------------------
-# Put rpc/ where an -I${STACK}/include can see it.
+# Put tirpc's headers where an -I${STACK}/include can see them.
 #
 # conda's libtirpc installs under include/tirpc/rpc/, mirroring the distro
 # layout that deliberately keeps those headers away from glibc's own sunrpc
@@ -205,10 +205,17 @@ done
 # and the manifest trap records it in etc/source-files.txt, which is what stops
 # prune.sh from treating it as a conda-owned path.  The receipt is the contract
 # compile after 'make install'.
-if [ ! -e "${STACK}/include/rpc" ]; then
-  ln -s tirpc/rpc "${STACK}/include/rpc"
-  log "linked include/rpc -> tirpc/rpc so an -I\${STACK}/include finds rpc/rpc.h"
-fi
+# All three top-level entries, not just rpc/: rpc/types.h includes <netconfig.h>,
+# which tirpc keeps beside rpc/ rather than inside it.  Linking only rpc/ got as
+# far as rpc/rpc.h and died on netconfig.h -- found by the contract compile
+# below, which is the whole reason it exists.  The result is the layout glibc's
+# own sunrpc had in /usr/include: rpc/, rpcsvc/, netconfig.h.
+for _e in rpc rpcsvc netconfig.h; do
+  [ -e "${STACK}/include/${_e}" ] && continue
+  [ -e "${STACK}/include/tirpc/${_e}" ] || continue
+  ln -s "tirpc/${_e}" "${STACK}/include/${_e}"
+  log "linked include/${_e} -> tirpc/${_e}"
+done
 
 xdr_inc="${STACK}/include/tirpc"
 xdr_flags=()
