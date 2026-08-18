@@ -121,8 +121,8 @@ export PETSC_ARCH=""
 # as an in-stack EXTERNAL Boost -- which is the intended answer, and why the
 # assertion below asks WHERE the Boost is rather than whether there is one.
 # libMesh's bundled contrib/boost subset (present through 1.8.x, gone on devel)
-# is what a stack without one falls back to.  --with-vexcl=no skips metaphysicl's whole
-# VexCL block -- the Boost library chain that was fatal, and an OpenCL header
+# is what a stack without one falls back to.  --with-vexcl=no skips metaphysicl's
+# whole VexCL block -- the Boost library chain that was fatal, and an OpenCL header
 # probe of /usr/include with it.  VexCL is a metaphysicl test dependency libMesh
 # never uses.
 #
@@ -167,10 +167,14 @@ done
 # the ambient CPPFLAGS and LIBS, and if that fails, retry with a HARD-CODED
 # -I/usr/include/tirpc -ltirpc -- which, on a host that has libtirpc-devel, it
 # then writes into libmesh_optional_INCLUDES.  A host path in the artifact.  So
-# the ambient flags are the only lever, and they are a sufficient one: CPPFLAGS
-# reaches consumers through 'libmesh-config --cppflags', and relocate/fixup-text.sh
-# rewrites the prefix in it like any other text file.  Winning the FIRST test is
-# also what stops the /usr/include/tirpc fallback from ever running.
+# the ambient flags are the only lever there, and winning that FIRST test is
+# what stops the /usr/include/tirpc fallback from ever running.
+#
+# They are a lever on this build only, though, NOT on what libMesh exports:
+# 'libmesh-config --cppflags' emits per-METHOD flags (-DNDEBUG), not configure's
+# CPPFLAGS, and 1.7.x records nothing about XDR in libmesh_optional_INCLUDES.
+# Consumers are served by the include/rpc symlink above instead -- measured, and
+# the reason it exists.
 #
 # Which road is taken is decided by asking the configure script what it accepts,
 # not by parsing PKG_VERSION: PKG_SOURCE=git can be any ref at all, and the flag
@@ -352,7 +356,7 @@ assert_libmesh_features () {
   done
   for m in ${LIBMESH_FEATURES_OFF}; do
     grep -q "^#define LIBMESH_${m}[[:space:]]" "${f}" && {
-      echo "${label}: LIBMESH_${m} IS set, and this recipe does not ask for it" >&2
+      echo "${label}: LIBMESH_${m} IS set; this recipe does not ask for it" >&2
       echo "  -- something was found that we did not point configure at." >&2
       bad=1; }
   done
@@ -382,9 +386,9 @@ assert_libmesh_features "${cfg_h}" "configure's libmesh_config.h"
 # so an external Boost found at all was found in the stack -- and the path check
 # below reads the generated compile line to confirm nothing outside it appears.
 if [ -d "${src}/contrib/boost" ]; then
-  log "Boost: external, from the stack (this libMesh also bundles a subset, unused)"
+  log "Boost: external, from the stack (this libMesh bundles a subset; unused)"
 else
-  log "Boost: external, from the stack (this libMesh bundles none -- the env is the only source)"
+  log "Boost: external, from the stack (this libMesh bundles none at all)"
 fi
 
 # The generic form of the same question, for every optional package at once:
@@ -431,22 +435,26 @@ fi
 # Every check above reads a file libMesh generated.  This one uses the artifact
 # the way a customer does -- ask libmesh-config for the compile line, hand it to
 # the compiler, include the headers that the features enabled above put in play
-# (xdr_cxx.h pulls rpc/rpc.h, dense_matrix.h pulls Eigen) -- and it is the only
-# check here that would have caught an exported include path that is complete
+# (xdr_cxx.h pulls rpc/rpc.h, dense_vector.h pulls Eigen/Core) -- and it is the
+# only check here that would have caught an exported include path that is complete
 # for libMesh's own build and short by one -I for everybody else.
 cat > "${BUILD_TMP}/contract.C" <<'EOF'
 #include <libmesh/libmesh.h>
 #include <libmesh/xdr_cxx.h>
-#include <libmesh/dense_matrix.h>
+#include <libmesh/dense_vector.h>
 int main () { return 0; }
 EOF
 # shellcheck disable=SC2046  # word splitting is the point: these are flags
-if PATH="${STACK}/bin:${PATH}" "${STACK}/bin/mpicxx"      $(METHOD=opt "${STACK}/bin/libmesh-config" --cppflags --cxxflags --include)      -c "${BUILD_TMP}/contract.C" -o "${BUILD_TMP}/contract.o" 2>"${WORK}/logs/libmesh-contract.log"; then
-  log "compile-line contract: libmesh-config's own flags compile libMesh's public headers"
+contract_flags="$(METHOD=opt "${STACK}/bin/libmesh-config" \
+                    --cppflags --cxxflags --include)"
+if PATH="${STACK}/bin:${PATH}" "${STACK}/bin/mpicxx" ${contract_flags} \
+     -c "${BUILD_TMP}/contract.C" -o "${BUILD_TMP}/contract.o" \
+     2>"${WORK}/logs/libmesh-contract.log"; then
+  log "compile-line contract: libmesh-config's flags compile libMesh's headers"
 else
   echo "the flags 'libmesh-config' emits cannot compile libMesh's own headers:" >&2
   head -20 "${WORK}/logs/libmesh-contract.log" >&2
-  echo "  flags were: $(METHOD=opt "${STACK}/bin/libmesh-config" --cppflags --cxxflags --include)" >&2
+  echo "  flags were: ${contract_flags}" >&2
   exit 1
 fi
 
