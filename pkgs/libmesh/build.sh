@@ -175,6 +175,37 @@ done
 # Which road is taken is decided by asking the configure script what it accepts,
 # not by parsing PKG_VERSION: PKG_SOURCE=git can be any ref at all, and the flag
 # either exists in that source or it does not.
+#------------------------------------------------------------------------------
+# Put rpc/ where an -I${STACK}/include can see it.
+#
+# conda's libtirpc installs under include/tirpc/rpc/, mirroring the distro
+# layout that deliberately keeps those headers away from glibc's own sunrpc
+# ones.  Nothing in this stack has glibc sunrpc headers to collide with -- the
+# 2.28 sysroot does not ship them, which is exactly why XDR was off here until
+# now -- and libMesh's PUBLIC include/libmesh/xdr_cxx.h does
+#
+#     #include <rpc/rpc.h>
+#
+# under HAVE_XDR.  On 1.8.x the path reaches a consumer because
+# --with-xdr-include is recorded in libmesh_optional_INCLUDES.  On 1.7.x there
+# is no such flag and no way to add one: m4/libmesh_optional_packages.m4 sets
+# libmesh_optional_INCLUDES="" at the top of the macro, so even a command-line
+# assignment is wiped.  Measured on 1.7.9 without this link: a consumer
+# compiling '#include <libmesh/xdr_cxx.h>' with exactly the flags
+# 'libmesh-config --cppflags --cxxflags --include' emits dies on
+# "rpc/rpc.h: No such file or directory".  Turning XDR on would have taken a
+# header that compiles today and broken it.
+#
+# So the include path libMesh already exports is made sufficient.  Relative, so
+# it survives relocation; created before configure, so the probe below sees it;
+# and the manifest trap records it in etc/source-files.txt, which is what stops
+# prune.sh from treating it as a conda-owned path.  The receipt is the contract
+# compile after 'make install'.
+if [ ! -e "${STACK}/include/rpc" ]; then
+  ln -s tirpc/rpc "${STACK}/include/rpc"
+  log "linked include/rpc -> tirpc/rpc so an -I\${STACK}/include finds rpc/rpc.h"
+fi
+
 xdr_inc="${STACK}/include/tirpc"
 xdr_flags=()
 xdr_libs=""
@@ -391,6 +422,32 @@ if [ -f "${mp_h}" ]; then
   grep -q -E '^#define (METAPHYSICL_)?HAVE_BOOST[[:space:]]' "${mp_h}" \
     && log "contrib/metaphysicl: Boost, from the stack" \
     || log "contrib/metaphysicl: no Boost recorded"
+fi
+
+#------------------------------------------------------------------------------
+# The receipt for all of it: the flags libMesh hands a consumer must compile
+# libMesh's own public headers.
+#
+# Every check above reads a file libMesh generated.  This one uses the artifact
+# the way a customer does -- ask libmesh-config for the compile line, hand it to
+# the compiler, include the headers that the features enabled above put in play
+# (xdr_cxx.h pulls rpc/rpc.h, dense_matrix.h pulls Eigen) -- and it is the only
+# check here that would have caught an exported include path that is complete
+# for libMesh's own build and short by one -I for everybody else.
+cat > "${BUILD_TMP}/contract.C" <<'EOF'
+#include <libmesh/libmesh.h>
+#include <libmesh/xdr_cxx.h>
+#include <libmesh/dense_matrix.h>
+int main () { return 0; }
+EOF
+# shellcheck disable=SC2046  # word splitting is the point: these are flags
+if PATH="${STACK}/bin:${PATH}" "${STACK}/bin/mpicxx"      $(METHOD=opt "${STACK}/bin/libmesh-config" --cppflags --cxxflags --include)      -c "${BUILD_TMP}/contract.C" -o "${BUILD_TMP}/contract.o" 2>"${WORK}/logs/libmesh-contract.log"; then
+  log "compile-line contract: libmesh-config's own flags compile libMesh's public headers"
+else
+  echo "the flags 'libmesh-config' emits cannot compile libMesh's own headers:" >&2
+  head -20 "${WORK}/logs/libmesh-contract.log" >&2
+  echo "  flags were: $(METHOD=opt "${STACK}/bin/libmesh-config" --cppflags --cxxflags --include)" >&2
+  exit 1
 fi
 
 remove_libtool_archives
