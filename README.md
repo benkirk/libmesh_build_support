@@ -56,7 +56,9 @@ docker compose run --rm shell      # /src on the toolchain image; inside it:
 VERIFY_IMAGE=almalinux:8 docker compose run --rm --build verify   # back on the host
 ```
 
-`make help` lists every target. The compose loop defaults to `linux/arm64` and
+`make help` lists every target; `make shell` gives an interactive shell that *is*
+the package build environment — the same compilers, flags and ISA wrappers a
+recipe gets, not just `$PATH` (`docs/EXTENDING.md`). The compose loop defaults to `linux/arm64` and
 `TARGET_PLATFORM=linux-aarch64`; for the x86 column set
 `PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64` in the environment (Rosetta on
 Apple Silicon; required for `BLAS_PROVIDER=mkl`). On a 4-vCPU CI runner

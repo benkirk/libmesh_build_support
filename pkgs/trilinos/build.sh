@@ -83,6 +83,26 @@ case "${TRILINOS_KOKKOS:-off}" in
      exit 1 ;;
 esac
 
+# TRILINOS_OPENMP: 'on' passes -DTrilinos_ENABLE_OpenMP=ON, 'off' (the default)
+# passes nothing.
+#
+# -DKokkos_ENABLE_OPENMP=ON is NOT the flag, and reaching for it is the obvious
+# mistake: packages/kokkos/cmake/kokkos_configure_trilinos.cmake re-sets that
+# cache variable with FORCE from Trilinos_ENABLE_OpenMP, defaulting it to OFF,
+# so a -D on the command line is silently overwritten and the build goes green
+# with the backend still off.  Measured; see docs/plans/implemented/.
+#
+# The flag is project-wide rather than Kokkos-only -- Teuchos and Epetra are
+# compiled differently too -- which is why it is its own knob.
+openmp=()
+case "${TRILINOS_OPENMP:-off}" in
+  on)  openmp=( -DTrilinos_ENABLE_OpenMP=ON )
+       log "OpenMP: ON (Trilinos-wide; drives Kokkos' OpenMP backend)" ;;
+  off) log "OpenMP: no flag" ;;
+  *) echo "TRILINOS_OPENMP must be 'on' or 'off', got: ${TRILINOS_OPENMP}" >&2
+     exit 1 ;;
+esac
+
 cmake \
     -DCMAKE_INSTALL_PREFIX="${STACK}" \
     -DCMAKE_AR="${ar_bin}" \
@@ -91,6 +111,7 @@ cmake \
     -DTrilinos_ENABLE_Sacado=ON \
     -DTrilinos_ENABLE_Pliris=ON \
     ${kokkos[@]+"${kokkos[@]}"} \
+    ${openmp[@]+"${openmp[@]}"} \
     -DBUILD_SHARED_LIBS=ON \
     -DTPL_ENABLE_DLlib=ON \
     -DTPL_ENABLE_BLAS=ON -DTPL_BLAS_LIBRARIES="${blas}" \

@@ -38,3 +38,16 @@ TRILINOS_VERSION ?= 16-1-0
 # 'auto' is the configuration that matches what they have; 'default' keeps
 # 'off', because 14-4-0's artifact must not move.  See mk/common.mk.
 TRILINOS_KOKKOS  ?= auto
+
+# OpenMP on, because measuring it found no cost: on linux-aarch64 at b6e8328,
+# against a same-commit control differing only in this flag, it added no file to
+# the artifact, no conda package, and -3,571 bytes net -- libkokkoscore and
+# libepetra grow, libteuchosparameterlist and libteuchoscomm shrink by about as
+# much.  validate stayed at 0 failures with all objects inside armv8.1-a.
+#
+# What it does change is the CONTRACT: KokkosConfig.cmake gains
+# FIND_DEPENDENCY(OpenMP REQUIRED COMPONENTS CXX), so a consumer whose compiler
+# has no OpenMP now fails at find_package(Kokkos).  That is the real cost, it is
+# not measurable in bytes, and 'bleeding' is the profile that exists to carry
+# it first.  See mk/common.mk for why this is not -DKokkos_ENABLE_OPENMP=ON.
+TRILINOS_OPENMP  ?= on

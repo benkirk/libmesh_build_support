@@ -1,5 +1,14 @@
 # Smoke example
 
+`trilinos_smoke.C` joins them, and is the only thing in this repo that loads the
+Trilinos libraries at all: Epetra, Teuchos and — when the profile ships it —
+Kokkos. It asserts values it computes independently (a `parallel_reduce` sum, a
+`ParameterList` round-trip, a global `Norm1`), and it asserts that the Kokkos
+host backend the runtime reports matches what the headers were compiled with —
+the check that catches a build where the OpenMP backend was requested and
+silently forced off. `test/run.sh` pins `OMP_NUM_THREADS` (`SMOKE_OMP_THREADS`,
+default 2) so its threads do not multiply against the MPI ranks.
+
 Two binaries, one Makefile: `smoke.c`, the MPI rank check whose contract is
 below, and libMesh's own `introduction_ex4`, built with `libmesh-config` and
 installed beside it, which `test/run.sh` runs in 1D/2D/3D, serial and on N

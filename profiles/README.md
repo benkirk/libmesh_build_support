@@ -14,11 +14,17 @@ make PROFILE=stable all
 | `stable` | 3.19.6 / 1.7.1 / 13-4-1 | conservative; the fallback when `default` breaks. Never built |
 | `bleeding` | 3.23.7 / 1.8.4 / 16-1-0 | the newer pairing. Built by `ci.yml` on both platforms since #30 |
 
-Each profile also sets `TRILINOS_KOKKOS` — `off` passes
-`-DTrilinos_ENABLE_Kokkos=OFF`, `auto` passes nothing and lets Trilinos decide.
-`bleeding` is the one on `auto`. It is assigned here rather than in
+Each profile also sets two Trilinos knobs, both assigned here rather than in
 `mk/common.mk` because that file is included *before* this one, so a `?=` there
-would win over these.
+would win over these:
+
+- `TRILINOS_KOKKOS` — `off` passes `-DTrilinos_ENABLE_Kokkos=OFF`, `auto` passes
+  nothing and lets Trilinos decide. `bleeding` is the one on `auto`.
+- `TRILINOS_OPENMP` — `on` passes `-DTrilinos_ENABLE_OpenMP=ON`, which is what
+  actually enables Kokkos' OpenMP backend; `-DKokkos_ENABLE_OPENMP=ON` does not,
+  because Trilinos re-sets it with `FORCE`. The flag is project-wide, so Teuchos
+  and Epetra are compiled differently too — which is why it is a separate knob
+  and not a third `TRILINOS_KOKKOS` value. `bleeding` is the one on `on`.
 
 Each `.mk` uses `?=`, so anything set in `config.mk` or on the command line wins.
 

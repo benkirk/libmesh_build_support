@@ -28,3 +28,6 @@ TRILINOS_VERSION ?= 14-4-0
 # stack has ever produced contains.  'bleeding' is where the other answer is
 # measured.  See mk/common.mk.
 TRILINOS_KOKKOS  ?= off
+
+# OpenMP off: this profile's artifact must not move.  See mk/common.mk.
+TRILINOS_OPENMP  ?= off

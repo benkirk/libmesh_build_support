@@ -103,6 +103,13 @@ log "compiling"
 # time; ld does not use -L or -rpath for that search.  The absolute -rpath is
 # correct and intentional -- relocate/patchelf.sh converts every rpath in the
 # tree to $ORIGIN-relative afterwards, so do not try to write $ORIGIN here.
+#
+# ${LDFLAGS} would already carry all three here -- -L and -rpath from
+# activate_toolchain, -rpath-link from the conda activate.d it sources.  They
+# are spelled out on purpose: this file is the worked example of a compile
+# line, and the same line has to work for a customer building against the
+# unpacked TARBALL, where there is no activate.d to source and neither
+# libmesh-config nor the .pc files emit -rpath-link.
 mpicc -O2 -g -fPIC -I"${STACK}/include" -c sitedemo.c -o sitedemo.o
 mpicc -shared -o libsitedemo.so sitedemo.o \
       -L"${STACK}/lib" -Wl,-rpath,"${STACK}/lib" -Wl,-rpath-link,"${STACK}/lib" -lpetsc

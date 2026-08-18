@@ -26,6 +26,26 @@ nothing runs it automatically today. It shows two things the template does not:
 a package with **no `PKG_URL`** (it generates its own sources), and one that
 declares `PKG_DEPS`.
 
+## Iterating on a recipe
+
+```sh
+cd docker && docker compose run --rm shell   # then, inside:
+make shell                                   # the build environment, interactively
+make my-solver                               # just yours; deps come from stamps
+rm "$WORK"/stamps/my-solver.stamp            # what make looks at -- delete to rebuild
+```
+
+`make shell` runs the same `activate_toolchain` your `build.sh` runs, so `CC`,
+`CXX`, `FC`, `CPPFLAGS`, `LDFLAGS`, `PKG_CONFIG_PATH` and the ISA wrappers are
+exactly what the recipe will see. **Do not export `CPPFLAGS`/`LDFLAGS` by hand
+to compensate** — `activate_toolchain` scrubs those on entry, deliberately, so
+anything you set in your shell is gone by the time your recipe compiles.
+`make shell-check` is the gate on all of this: it builds a libMesh example
+through that shell with no hand-written flags at all.
+
+Every package writes its full log to `$WORK/logs/<name>.log`; on failure only
+the last 40 lines are echoed, so read the file for anything else.
+
 ## Getting your package tested
 
 Install an executable into **`$STACK/libexec/stack-tests/`** and `test/run.sh`
@@ -75,11 +95,17 @@ or `make clean`, when changing *what* is built (`DESIGN.md`, constraints).
 
 Receives `STACK`, `WORK`, `SRC_CACHE`, `CONDA_HOME`, `NPROC`, `MAKE_J_L`,
 `TARGET_PLATFORM`, `BLAS_PROVIDER`, `MPI_FAMILY`, `RPATH_MODE`, `ISA_BASELINE`,
-`USE_WRAPPERS`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
+`USE_WRAPPERS`, `PROFILE`, the version pins, `TRILINOS_KOKKOS`,
+`TRILINOS_OPENMP`, `TOPDIR`, and its own `PKG_NAME` / `PKG_VERSION` / `PKG_URL` /
 `PKG_DIR` / `PKG_SOURCE` / `PKG_GIT_URL` / `PKG_GIT_REF`.
 
 Prefer `make $MAKE_J_L` over a bare `make -j$NPROC`: it carries a `-l` load cap,
 which is what keeps a shared build host usable.
+
+`activate_toolchain` exports `LDFLAGS="-L$STACK/lib -Wl,-rpath,$STACK/lib"` and
+`CPPFLAGS="-I$STACK/include"`, on top of whatever conda's `activate.d` scripts
+set — which is where `-Wl,-rpath-link` comes from. Append to those rather than
+replacing them.
 
 Sourcing `lib/build_common.sh` gives you `activate_toolchain`, `list_build_env`,
 `download_src`, `fetch_git`, `fetch_src`, `log`, `require`, `clean_build_tmp`,
@@ -143,6 +169,18 @@ uses their own compiler; `mpicc -show` and `MPICH_CC` still serve them.
 
 ## Things that will bite you
 
+- **`-rpath-link` is inherited, not granted — and it does not travel.** Inside
+  the template it arrives from conda's `activate-gcc_<platform>.sh`, which
+  `activate_toolchain` sources, so a recipe links `-lpetsc` and never notices.
+  A consumer of the *shipped tree* has no `activate.d` to source, and neither
+  `libmesh-config` nor the `.pc` files emit it — so the same link fails on
+  `undefined reference` to symbols `ldd` reports as fully resolved, because
+  `ld` uses neither `-L` nor `-rpath` to resolve a linked library's own
+  `DT_NEEDED` entries. Pass `-Wl,-rpath-link,$STACK/lib` explicitly in anything
+  a customer runs. Same shape: a consumer of a Kokkos built with the OpenMP
+  backend must pass **`-fopenmp`** or the headers `#error` outright, and
+  whether that backend is on is per-profile — ask the artifact, as
+  `test/smoke/Makefile` does.
 - **`dlopen`ed plugins are invisible to `ldd`**, which is why `prune.sh` works
   by whole conda package and never touches files a source build installed, and
   `slim.sh` removes only named directories and file patterns (`.la`, `.a`, docs;

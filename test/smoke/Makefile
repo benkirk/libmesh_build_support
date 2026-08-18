@@ -34,6 +34,12 @@ CFLAGS   ?= -O2 -g -Wall
 # 'ldd libpetsc.so' reports zero unresolved libraries.  The library is fine;
 # the linker simply was not told where to look.  -rpath-link is link-time only
 # and leaves nothing in the binary, so it cannot affect relocation.
+#
+# A package build gets this for free and does not know it: conda's
+# activate-gcc_<platform>.sh puts -Wl,-rpath-link,$$CONDA_PREFIX/lib on LDFLAGS,
+# and activate_toolchain sources it.  This Makefile is not a package build --
+# test/run.sh invokes it with plain env -- so it is on its own, exactly like a
+# customer building against the unpacked tarball.
 LDFLAGS  += -L$(STACK)/lib -Wl,-rpath,$(STACK)/lib -Wl,-rpath-link,$(STACK)/lib
 
 # Feature detection, so the example can grow as packages land without the
@@ -87,6 +93,64 @@ $(EX4_BIN): $(EX4_SRC) | $(BUILDDIR)
 endif
 endif
 
+# --- Trilinos ---------------------------------------------------------------
+#
+# The Trilinos half of the artifact, which nothing exercised before this: the
+# stack ships Epetra, Teuchos, Sacado, Pliris and (per profile) Kokkos, and
+# distcheck only ever proved they RESOLVE.  Installed into $STACK/libexec so it
+# travels inside the tarball, same as smoke and ex4, and for the same reason --
+# the verify image has no compiler, so the binary that runs there must be one
+# we shipped.
+#
+# Feature-detected rather than assumed, because the profiles genuinely differ:
+# 'default' builds Trilinos with -DTrilinos_ENABLE_Kokkos=OFF and ships no
+# libkokkoscore at all, so the Kokkos half is compiled in only when it is there.
+# Kokkos headers install under include/kokkos/, NOT include/ -- a detail that
+# costs an afternoon if you assume otherwise.
+TRILINOS_SMOKE_BIN = $(STACK)/libexec/trilinos_smoke
+HAVE_EPETRA        := $(wildcard $(TRILINOS_DIR)/include/Epetra_Vector.h)
+HAVE_KOKKOS        := $(wildcard $(TRILINOS_DIR)/include/kokkos/Kokkos_Core.hpp)
+
+ifneq ($(HAVE_EPETRA),)
+all: $(TRILINOS_SMOKE_BIN)
+
+TRILINOS_CXXFLAGS = -std=c++17 -O2 -g -Wall -I$(TRILINOS_DIR)/include
+TRILINOS_LDLIBS   = -lepetra -lteuchoscore -lteuchosparameterlist -lteuchoscomm \
+                    -lteuchosnumerics -lteuchosremainder
+ifneq ($(HAVE_KOKKOS),)
+  TRILINOS_CXXFLAGS += -DSMOKE_HAVE_KOKKOS -I$(TRILINOS_DIR)/include/kokkos
+  TRILINOS_LDLIBS   += -lkokkoscore -lkokkoscontainers
+
+  # -fopenmp is NOT optional for a consumer of a Kokkos built with the OpenMP
+  # backend, and it is not a courtesy either: Kokkos_OpenMP_Instance.hpp carries
+  #
+  #     #error "You enabled Kokkos OpenMP support without enabling OpenMP in the
+  #             compiler!"
+  #
+  # so the headers refuse to compile at all.  That is the consumer half of the
+  # contract KokkosConfig.cmake states as FIND_DEPENDENCY(OpenMP REQUIRED
+  # COMPONENTS CXX), and a cmake consumer gets it for free through
+  # OpenMP::OpenMP_CXX.  This Makefile is not a cmake consumer, so it has to say
+  # so itself -- and it must ask the ARTIFACT whether the backend is on rather
+  # than assume, because that is per-profile.  Measured the hard way: without
+  # this the build fails in exactly the place a customer's would.
+  HAVE_KOKKOS_OMP := $(shell grep -l 'define KOKKOS_ENABLE_OPENMP' \
+                       "$(TRILINOS_DIR)/include/kokkos/KokkosCore_config.h" 2>/dev/null)
+  ifneq ($(HAVE_KOKKOS_OMP),)
+    TRILINOS_CXXFLAGS += -fopenmp
+  endif
+endif
+
+# -rpath-link for the same reason as everywhere else in this file: ld resolves
+# libepetra.so's own DT_NEEDED entries through it, and -L does not participate.
+$(TRILINOS_SMOKE_BIN): trilinos_smoke.C | $(BUILDDIR)
+	$(MPICXX) $(TRILINOS_CXXFLAGS) -o $(BUILDDIR)/trilinos_smoke trilinos_smoke.C \
+	  -L$(TRILINOS_DIR)/lib -Wl,-rpath,$(TRILINOS_DIR)/lib \
+	  -Wl,-rpath-link,$(STACK)/lib $(TRILINOS_LDLIBS)
+	mkdir -p $(dir $@)
+	cp $(BUILDDIR)/trilinos_smoke $@
+endif
+
 $(SMOKE_BIN): smoke.c | $(BUILDDIR)
 	$(MPICC) $(CFLAGS) -o $(BUILDDIR)/smoke smoke.c $(LDFLAGS) $(LDLIBS)
 	mkdir -p $(dir $@)
@@ -99,4 +163,4 @@ run: $(SMOKE_BIN)
 	$(SMOKE_BIN)
 
 clean:
-	rm -rf $(BUILDDIR) $(SMOKE_BIN) $(EX4_BIN)
+	rm -rf $(BUILDDIR) $(SMOKE_BIN) $(EX4_BIN) $(TRILINOS_SMOKE_BIN)
