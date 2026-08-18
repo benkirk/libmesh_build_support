@@ -218,14 +218,31 @@ Kokkos-only change, and the numbers say so.
 non-ELF file` at `--stage final`, and `distcheck` validated and ran
 `introduction_ex4` 1D/2D/3D on 4 ranks from a path containing a space.
 
-### What this does NOT answer
+### Answered afterwards, by CI on #31
 
-- **x86-64.** Not run. Kokkos' arch tables are per-architecture, and this is
-  the platform where the ISA findings have come from. Do not measure it under
-  Rosetta — dispatch `ci.yml` on a throwaway branch.
-- **Anything at run time.** Nothing in the harness links Kokkos, so
-  `Kokkos::initialize` was never called and no thread team was ever created.
-  Green here means the artifact builds, relocates and resolves — not that the
-  OpenMP backend works.
+The two gaps above that were worth closing, closed:
+
+- **x86-64.** `349/349` objects within `x86-64-v2` — the same object count as
+  aarch64, and nothing above the floor on the architecture with the most
+  `-march` surface. This was the risk ranked most likely at the top of this
+  document, and it did not materialize on either platform.
+- **Run time.** `test/smoke/trilinos_smoke.C` now links Kokkos, Teuchos and
+  Epetra, so `Kokkos::initialize` IS called: `backend=OpenMP concurrency=2`
+  in place, post-relocate, from the relocated tarball, and read-only, on both
+  architectures and on `almalinux:8` (the glibc floor) and `ubuntu:24.04` with
+  no compiler present. `349 objects resolve with no environment` under `env -i`
+  is what says libgomp comes from inside the tree.
+- **The CMake configs** resolve: 70 paths, both stages, both platforms.
+
+### Still not answered
+
+- **`find_package(Kokkos)` from a real cmake consumer.** `cmake` is on
+  `conda/prune.list` and the builder image ships none, so
+  `FIND_DEPENDENCY(OpenMP REQUIRED COMPONENTS CXX)` is asserted by inspection.
+  The compile-time half of that contract IS enforced -- Kokkos' headers carry an
+  `#error` without `-fopenmp` -- and it caught a real bug on its first run.
 - **MKL.** x86-only, unlocked, and the one place two OpenMP runtimes could
   collide.
+- **Thread placement under load.** CI reports `4 cores / 4 ranks / 2 threads`
+  and Kokkos warns about oversubscription. Harmless to correctness, noisy in
+  every log; the harness should scale `SMOKE_OMP_THREADS` to the rank count.
