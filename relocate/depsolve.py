@@ -46,7 +46,12 @@ CORE_ALLOWLIST = {
 # Must resolve INSIDE the tree, never from the host.  Getting the host's
 # libstdc++ is the single failure that works on the build machine and breaks
 # everywhere else.
-MUST_BE_INTERNAL = {"libstdc++.so.6", "libgcc_s.so.1", "libgfortran.so.5"}
+# libgomp joins them because the artifact genuinely leans on OpenMP now:
+# libMesh compiles with -fopenmp, and a profile may put Kokkos' OpenMP
+# backend in libkokkoscore.  A host libgomp resolving here is the same
+# failure as a host libstdc++ -- it works on the build machine.
+MUST_BE_INTERNAL = {"libstdc++.so.6", "libgcc_s.so.1", "libgfortran.so.5",
+                    "libgomp.so.1"}
 
 # Libraries that are host-provided BY DESIGN and legitimately absent.
 #
