@@ -39,4 +39,5 @@ dependencies:
   - eigen=3.4.*        # NOT Eigen 5; headers land in include/eigen3
   - libtirpc           # rpc/xdr.h: gone from glibc 2.32, unusable in the 2.28 sysroot
   - xorg-libxt         # X11/Intrinsic.h, a build-time header dep of contrib/tecplot/tecio
+  - xorg-xorgproto     # X11/X.h, which Xlib.h includes; a build-only dep of xorg-libx11
   - glpk               # nlopt is deliberately absent: no python-free build exists

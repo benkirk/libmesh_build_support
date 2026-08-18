@@ -229,6 +229,13 @@ else
   #    whole feature when that header is missing -- which is why --enable-tecio
   #    has been in the recipe since v0 and has never actually been on.  Nothing
   #    links libXt; see conda/prune.list.
+  #  - xorg-xorgproto is NOT redundant with it, and finding that out cost a
+  #    build: xorg-libxt brings xorg-libx11, which installs X11/Xlib.h, and
+  #    Xlib.h's first include is <X11/X.h> -- a PROTOCOL header, which
+  #    conda-forge ships in xorg-xorgproto and depends on only at build time.
+  #    So the env had Intrinsic.h and Xlib.h and still could not compile a file
+  #    that included either, and tecio.m4 read that as "no X11" exactly as it
+  #    does on a machine with no X at all.
   #  - glpk is small (it brings only gmp) and is probed by default, so taking it
   #    from the env is the same decision as the rest: the alternative is not "no
   #    dependency" but "whatever the build host had".
@@ -241,7 +248,7 @@ else
   # python conda/prune.list removes when SHIP_PYTHON=no, which validate.sh would
   # then fail on an unresolved libpython.  pkgs/libmesh/build.sh passes
   # --disable-nlopt instead: that closes the /usr probe, which was the point.
-  specs+=( libboost-headers "eigen=3.4.*" libtirpc xorg-libxt glpk )
+  specs+=( libboost-headers "eigen=3.4.*" libtirpc xorg-libxt xorg-xorgproto glpk )
 
   "${CONDA}" create -y -p "${STACK}" "${specs[@]}"
 fi

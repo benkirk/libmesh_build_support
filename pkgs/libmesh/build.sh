@@ -146,6 +146,7 @@ for f in include/boost/version.hpp \
          include/eigen3/Eigen/Dense \
          include/tirpc/rpc/xdr.h \
          include/X11/Intrinsic.h \
+         include/X11/X.h \
          include/glpk.h; do
   [ -e "${STACK}/${f}" ] || {
     echo "the env is missing ${f}, which this recipe configures against." >&2
