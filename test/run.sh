@@ -174,13 +174,20 @@ check_libmesh_config_paths () {
 # A consumer gets no error from it either -- the compiler ignores a missing -I
 # and then fails much later on a header it cannot find.
 check_libmesh_include_paths () {
-  local lmc="${LIBMESH_DIR}/bin/libmesh-config" p missing=""
+  local lmc="${LIBMESH_DIR}/bin/libmesh-config" flag p missing=""
   [ -x "${lmc}" ] || return 0
   echo "--- libmesh-config: every -I resolves inside the tree"
-  for p in $(METHOD=opt "${lmc}" --cppflags --include 2>/dev/null | tr ' ' '\n' \
-             | sed -n 's/^-I//p'); do
-    [ -d "${p}" ] || missing="${missing} ${p}"
-  done
+  # Split the flag string on ' -', not on whitespace.  The tree's own path may
+  # contain a space -- distcheck deliberately unpacks into '.../a b/c' to keep
+  # A32 honest -- and splitting on whitespace tears such a path in half, which
+  # is what the first version of this check did.  It passed everywhere except
+  # the one place built to catch exactly that.
+  while IFS= read -r flag; do
+    case "${flag}" in -I?*) p="${flag#-I}" ;; *) continue ;; esac
+    [ -d "${p}" ] || missing="${missing}
+      ${p}"
+  done < <(METHOD=opt "${lmc}" --cppflags --include 2>/dev/null \
+           | awk '{ gsub(/ -/, "\n-"); print }')
   [ -z "${missing}" ] || fail "libmesh-config names include director(ies) that do not exist:${missing}"
 }
 
