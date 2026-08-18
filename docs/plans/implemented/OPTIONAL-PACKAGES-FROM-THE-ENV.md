@@ -10,7 +10,7 @@ include-path check is in `test/run.sh`; `HOST_REPOS` runs through
 Follow-on to [`HOST-BOOST-ISOLATION.md`](HOST-BOOST-ISOLATION.md), which closed
 the Boost probe and listed the rest as out of scope. The second half of that
 handoff — a second PETSc/libMesh/Trilinos pairing in CI — is still
-[`../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md`](../OPTIONAL-PACKAGES-AND-SECOND-PROFILE.md).
+[`SECOND-PROFILE.md`](SECOND-PROFILE.md).
 
 ## Context
 
