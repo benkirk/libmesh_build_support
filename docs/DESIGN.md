@@ -177,13 +177,40 @@ Do not re-discover these. Each was paid for once.
   the host Boost and ships `LIBMESH_HAVE_EXTERNAL_BOOST 1` and `-I/usr/include`
   in `libmesh-config --include` (measured). The conda compiler never sees the
   host `/usr/include` by itself; only autoconf macros that probe `/usr`, `/opt`
-  and `$BOOST_ROOT` explicitly let it in (Boost; also Eigen, XDR/tirpc, VTK,
-  curl in libMesh's m4). So: `--with-boost=$STACK --with-vexcl=no`, assertions
-  on what configure recorded and on the installed `libmesh-config`/`.pc` files
-  (`pkgs/libmesh/build.sh`, `test/run.sh`), an environment scrub in
-  `activate_toolchain`, and `extended.yml`'s weekly `host-boost` job on a
-  deliberately dirtied `almalinux:8`. Numbers:
+  and `$BOOST_ROOT` explicitly let it in (Boost; also Eigen, XDR/tirpc, X11,
+  GLPK, NLopt, VTK, curl in libMesh's m4). So: `--with-boost=$STACK
+  --with-vexcl=no`, assertions on what configure recorded and on the installed
+  `libmesh-config`/`.pc` files (`pkgs/libmesh/build.sh`, `test/run.sh`), an
+  environment scrub in `activate_toolchain`, and `extended.yml`'s weekly
+  `dirty-host` job on a deliberately dirtied `almalinux:8`. Numbers:
   [`plans/implemented/HOST-BOOST-ISOLATION.md`](plans/implemented/HOST-BOOST-ISOLATION.md).
+- **Pointing a probe at `$STACK` is only half an answer; the stack has to hold
+  the package.** Every optional package libMesh looks for now comes from the
+  conda env — Boost (`libboost-headers`), Eigen (`eigen`, in `include/eigen3`,
+  *not* `include/`, where libMesh's own bundled copy lands), XDR (`libtirpc`),
+  the X11 headers `contrib/tecplot/tecio` needs (`xorg-libxt` **and**
+  `xorg-xorgproto`, since `Xlib.h`'s first include is the protocol header
+  `X11/X.h`), and GLPK. Two of those features had never been on at all: the
+  glibc 2.28 sysroot has no usable `rpc/xdr.h`, and `--enable-tecio` has been in
+  the recipe since v0 while `HAVE_TECPLOT_API` was never once defined in a
+  shipped artifact, because `tecio.m4` disables itself in one line when the X11
+  headers are missing. NLopt is the exception and is explicitly `--disable`d:
+  every conda-forge build of it carries the Python bindings and depends on
+  numpy. A flag is a request, not a receipt — `pkgs/libmesh/build.sh` holds
+  `libmesh_config.h` to a required-on / required-off table, before the compile
+  and again on the installed header.
+- **A feature being on is not the same as a consumer being able to use it.**
+  libMesh's public `xdr_cxx.h` includes `<rpc/rpc.h>` under `HAVE_XDR`, and
+  conda's libtirpc keeps its headers under `include/tirpc/`. libMesh 1.8 exports
+  that path (`--with-xdr-include` lands in `libmesh_optional_INCLUDES`); 1.7
+  cannot be made to at all — the variable is cleared at the top of the macro and
+  `libmesh-config --cppflags` carries per-METHOD flags only. So the recipe links
+  `include/{rpc,rpcsvc,netconfig.h}` to their `tirpc/` counterparts, the layout
+  glibc's own sunrpc had, and then *proves* it: after `make install` it asks
+  `libmesh-config` for the compile line and compiles a TU including `libmesh.h`,
+  `xdr_cxx.h` and `dense_vector.h` with exactly those flags. That check found
+  both the missing `rpc/` path and, once linked, the `netconfig.h` behind it —
+  neither of which any check on a generated file could see.
 - **Changing a package's source mode does not invalidate its stamp.**
   `mk/pkg.mk`'s rule depends on dependency stamps and `build.sh` — not on the
   version, the URL, the source mode or the git ref. So

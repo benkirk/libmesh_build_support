@@ -131,7 +131,7 @@ red was invisible (PR #14).
 | `libmesh-git` | both platforms, `LIBMESH_SOURCE=git` | the git-source path, and the only job needing git in the image *and* autotools in the env |
 | `builder-distro` | `linux-64` on `ubuntu:24.04` | the builder's own distro should be irrelevant; PR #20 found it lending us `ar` |
 | `customer-demo-stack` | `linux-64`, `source_ref: customer_demo`, `site_dirs: customer` | a customer's own two packages layered on through `SITE_DIRS`, from the branch that carries them — the `EXTENDING.md` extension point built for real |
-| `host-boost` | `linux-64` on `almalinux:8` with `host_extras: boost-devel` | a deliberately dirtied builder: the Rocky 8 + Boost 1.66 case that broke libMesh's configure, now expected to build identically to a clean host (`DESIGN.md`, host dev packages) |
+| `dirty-host` | `linux-64` on `almalinux:8`, `host_repos: epel-release powertools`, `host_extras:` `boost-devel eigen3-devel libtirpc-devel libXt-devel glpk-devel cppunit-devel` | a deliberately dirtied builder — one distro dev package for every probe libMesh's m4 makes — expected to build identically to a clean host (`DESIGN.md`, host dev packages) |
 
 All but `fresh-solve` are `experimental: true`; all but `fresh-solve` and `mkl`
 verify on two bases (`almalinux:8`, `ubuntu:24.04`) rather than five — if a
@@ -153,7 +153,7 @@ one only from a solve someone watched succeed.
 |---|---|
 | `build` job, default config | `docker compose run --rm build` (its command is `make all`); on Apple Silicon add `PLATFORM=linux/amd64 TARGET_PLATFORM=linux-64` for the x86 column |
 | one `verify (<base>)` job | `VERIFY_IMAGE=<base> docker compose run --rm --build verify` — **`--build` is load-bearing**: without it compose reuses the last image and silently ignores `VERIFY_IMAGE`. Check the `=== verify on <distro>, glibc <v>` line |
-| the `host-boost` job | `BASE_IMAGE=almalinux:8 HOST_EXTRAS=boost-devel docker compose -p dirty build build && docker compose -p dirty run --rm build` — a separate project name, so the dirtied image and its build root do not become tomorrow's clean build |
+| the `dirty-host` job | `BASE_IMAGE=almalinux:8 HOST_REPOS='epel-release powertools' HOST_EXTRAS='boost-devel eigen3-devel libtirpc-devel libXt-devel glpk-devel cppunit-devel' docker compose -p dirty build build && docker compose -p dirty run --rm build` — a separate project name, so the dirtied image and its build root do not become tomorrow's clean build |
 | the fast gate | `make -n all && make help`, `shellcheck --severity=warning $(git ls-files '*.sh')`, `python3 relocate/isa-scan.py --self-test`, `python3 .github/scripts/check-md-links.py` |
 | the published image | `make image-shell` on the commit CI built |
 

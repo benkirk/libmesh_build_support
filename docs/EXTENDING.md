@@ -163,7 +163,20 @@ uses their own compiler; `mpicc -show` and `MPICH_CC` still serve them.
 - **`configure` scripts wander the host.** Autoconf macros of the
   `--with-foo=DIR` kind fall back to `/usr`, `/usr/local`, `/opt` and `$FOO_ROOT`
   when not told where to look, and a dev package on the build host then follows
-  the artifact everywhere. Point them at `$STACK` explicitly (see the Boost
-  flags in `pkgs/libmesh/build.sh`), and pipe whatever your recipe installs as
-  a compile-line contract (`foo-config`, `.pc`) through `assert_no_host_paths`
-  from `lib/build_common.sh`.
+  the artifact everywhere. Point them at `$STACK` explicitly (see the optional-
+  package flags in `pkgs/libmesh/build.sh`), and pipe whatever your recipe
+  installs as a compile-line contract (`foo-config`, `.pc`) through
+  `assert_no_host_paths` from `lib/build_common.sh`.
+- **Finding a header is not the same as recording where it is.** `activate_toolchain`
+  puts `-I$STACK/include` on `CPPFLAGS`, so a probe can *succeed* against the
+  stack while still writing its own default — `/usr/include` — into the flags it
+  exports. libMesh's `nlopt.m4` does exactly that, and with neither flag nor
+  `$NLOPT_DIR` set it exports the degenerate `-I` and `-L -lnlopt`. Pass the
+  explicit `--with-foo-include` / `--with-foo-lib` even when the build already
+  works without them.
+- **A silently disabled feature is the default failure mode.** An optional
+  package that cannot be found does not fail a build; it prints one line and
+  turns itself off. `--enable-tecio` was in `pkgs/libmesh/build.sh` from v0 and
+  `HAVE_TECPLOT_API` was never once defined in a shipped artifact. If your
+  recipe asks for a feature, assert on the generated config header that it is
+  there — a flag is a request, not a receipt.

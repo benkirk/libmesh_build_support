@@ -67,15 +67,17 @@ CI built for your checkout instead of building one.
 
 ## What you get
 
-Measured on `main` at `a61f0d6` (2026-08-16); the `ci` run summary is the live
-source and supersedes this table.
+`linux-aarch64` measured on this branch (2026-08-17); `linux-64` still from
+`main` at `a61f0d6` and refreshed by the next `ci` run, which is the live source
+and supersedes this table.
 
 | | linux-64 | linux-aarch64 |
 |---|---|---|
 | from source | PETSc 3.20.5, Trilinos 14-4-0, libMesh 1.7.9 | same |
-| from conda-forge | mpich 5.0.1, OpenBLAS, HDF5 1.14 (serial); libstdc++ 16.1 runtime, compiled with gcc 14 | same |
-| tarball | 111 MB, 58 packages | 106 MB, 58 packages |
-| ELF objects | 335, all within `x86-64-v2` | 333, all within `armv8.1-a` |
+| from conda-forge | mpich 5.0.1, OpenBLAS, HDF5 1.14 (serial); Boost 1.91, Eigen 3.4, libtirpc, GLPK 5.0 for libMesh; libstdc++ 16.1 runtime, compiled with gcc 14 | same |
+| libMesh options on | PETSc, HDF5, NetCDF-4, ExodusII, Boost, Eigen, XDR, Tecplot (TecIO), GLPK, MetaPhysicL, Triangle | same |
+| tarball | 111 MB, 58 packages | 123 MB, 63 packages |
+| ELF objects | 335, all within `x86-64-v2` | 341, all within `armv8.1-a` |
 | glibc floor | 2.28 requested, 2.27 measured | same |
 | runs on | `almalinux:8` (glibc 2.28) through `ubuntu:24.04` (2.39), five images | same |
 
