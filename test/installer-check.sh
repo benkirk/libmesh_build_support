@@ -23,6 +23,16 @@ SMOKE_RANKS="${SMOKE_RANKS:-4}"
 [ -f "${TARBALL}" ]   || { echo "no tarball at ${TARBALL}" >&2; exit 1; }
 [ -f "${INSTALLER}" ] || { echo "no installer at ${INSTALLER}" >&2; exit 1; }
 
+# The builder image has no diffutils -- 'diff' and 'cmp' are both absent, which
+# this gate discovered the hard way on the first CI run.  Adding a package just
+# to compare two trees would inflate the very minimal-host claim this repo
+# spends its effort measuring, so the comparisons below use python instead: it
+# is already required here (validate.sh --full and make-installer.sh both need
+# it), and hashing content is a stricter identity check than diff -r anyway.
+PY="${CONDA_HOME:-}/bin/python"
+[ -x "${PY}" ] || PY="$(command -v python3 || true)"
+[ -x "${PY}" ] || { echo "no python to compare trees with" >&2; exit 1; }
+
 SCRATCH="$(mktemp -d "${DISTCHECK_TMP:-/tmp}/installer-check.XXXXXX")"
 cleanup () {
   local rc=$?
@@ -49,8 +59,17 @@ sh "${INSTALLER}" --check
 # off by something that happens to still gunzip.
 sh "${INSTALLER}" --list | sort > "${SCRATCH}/list.run"
 tar -tzf "${TARBALL}"     | sort > "${SCRATCH}/list.tar"
-diff -u "${SCRATCH}/list.tar" "${SCRATCH}/list.run" \
-  || { echo "--list does not match the tarball's contents" >&2; exit 1; }
+if [ "$(cat "${SCRATCH}/list.tar")" != "$(cat "${SCRATCH}/list.run")" ]; then
+  echo "--list does not match the tarball's contents" >&2
+  "${PY}" -c '
+import sys
+a = set(open(sys.argv[1]).read().split("\n"))
+b = set(open(sys.argv[2]).read().split("\n"))
+for x in sorted(a - b)[:20]: print("    only in the tarball:", x, file=sys.stderr)
+for x in sorted(b - a)[:20]: print("    only in --list     :", x, file=sys.stderr)
+' "${SCRATCH}/list.tar" "${SCRATCH}/list.run"
+  exit 1
+fi
 echo "  ok    --list matches the tarball ($(wc -l < "${SCRATCH}/list.tar" | tr -d ' ') entries)"
 
 #------------------------------------------------------------------------------
@@ -60,9 +79,49 @@ echo "--- payload identity: --extract-only vs a plain untar"
 mkdir -p "${SCRATCH}/from-run" "${SCRATCH}/from-tar"
 sh "${INSTALLER}" --extract-only --dest "${SCRATCH}/from-run" --quiet --skip-validate
 tar -xzf "${TARBALL}" -C "${SCRATCH}/from-tar"
-diff -r "${SCRATCH}/from-tar/stack" "${SCRATCH}/from-run/stack" \
-  || { echo "the .run payload is NOT the tarball -- the premise is broken" >&2; exit 1; }
-echo "  ok    identical trees"
+"${PY}" - "${SCRATCH}/from-tar/stack" "${SCRATCH}/from-run/stack" <<'IDENT'
+import hashlib, os, sys
+
+
+def manifest(root):
+    # rel path -> (kind, content hash + mode | symlink target).  Mode is part
+    # of identity: an installer that drops the executable bit produces a tree
+    # that compares equal by content and does not run.
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(dirnames + filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            if os.path.islink(full):
+                out[rel] = ("link", os.readlink(full))
+            elif os.path.isdir(full):
+                out[rel] = ("dir", "")
+            else:
+                h = hashlib.sha256()
+                with open(full, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(b)
+                mode = os.stat(full).st_mode & 0o7777
+                out[rel] = ("file", "%s:%o" % (h.hexdigest(), mode))
+    return out
+
+
+a, b = manifest(sys.argv[1]), manifest(sys.argv[2])
+if a == b:
+    print("  ok    identical trees (%d entries, content and mode)" % len(a))
+    sys.exit(0)
+
+print("the .run payload is NOT the tarball -- the premise is broken", file=sys.stderr)
+for rel in sorted(set(a) - set(b))[:20]:
+    print("    only in the tarball:", rel, file=sys.stderr)
+for rel in sorted(set(b) - set(a))[:20]:
+    print("    only in the .run   :", rel, file=sys.stderr)
+for rel in sorted(set(a) & set(b)):
+    if a[rel] != b[rel]:
+        print("    differs:", rel, a[rel], "!=", b[rel], file=sys.stderr)
+sys.exit(1)
+IDENT
 
 #------------------------------------------------------------------------------
 # REPRODUCIBILITY.  Same inputs, same bytes.
@@ -93,7 +152,6 @@ echo "  ok    ${a}"
 echo
 echo "--- a modified payload is refused"
 cp "${INSTALLER}" "${SCRATCH}/tampered.run"
-PY="${CONDA_HOME:-}/bin/python"; [ -x "${PY}" ] || PY="$(command -v python3 || true)"
 if [ -x "${PY}" ]; then
   "${PY}" -c '
 import sys
