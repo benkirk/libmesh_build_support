@@ -362,6 +362,19 @@ silently corrected, because the reasoning is the useful part:
   retired the path `distcheck` and A38 were won on the moment a `.run` appeared
   in `dist/`. Both, in the five jobs that already exist.
 
+- **The verify matrix must not run the loader scan twice.** The `.run`'s
+  post-install self-check re-execs `ld.so` over ~340 objects — the same scan the
+  tarball leg just performed on byte-identical content. The second pass is not
+  merely redundant, it is pathologically slow: **226s against leg 1's 53s** on
+  the machines that survived it, and still running after twenty minutes against
+  a 40-second leg 1 on the machines that did not. Two ~500 MB trees do not both
+  fit in a runner's page cache, so every `exec` faults in from cold disk. This
+  cost three CI rounds, diagnosed as a hang each time, because a job that
+  exceeds `timeout-minutes` is *cancelled* and GitHub retains no logs for a
+  cancelled job — the one failure mode that needs a log cannot produce one. The
+  verify leg now passes `--skip-validate`; the self-check stays gated by
+  `installer-check`, in the builder image, where it belongs.
+
 Smaller ones, each of which would have cost a session: `df` is measured at the
 nearest *existing* ancestor, because the prefix is the thing not yet created;
 version compares are numeric field by field, because `2.9` sorts above `2.34` as
