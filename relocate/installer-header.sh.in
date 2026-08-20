@@ -444,6 +444,17 @@ fi
 [ -r "${ROOT}/activate.sh" ] || die "${EX_EXTRACT}" "extraction produced no ${ROOT}/activate.sh"
 
 #------------------------------------------------------------------------------
+# Extraction succeeded, so stop treating the tree as disposable.
+#
+# The trap above exists for a PARTIAL extraction, which is worse than none: it
+# looks installed and fails later, somewhere with no connection to this.  A
+# tree that unpacked completely and then failed its loader check is the
+# opposite -- it is the evidence, and deleting it leaves a bug report that
+# says only "it did not work".  Same reasoning as distcheck.sh, which moves
+# the original aside rather than removing it.
+trap - EXIT INT TERM
+
+#------------------------------------------------------------------------------
 # Post-install self-check: the tree verifying itself, with no repo present.
 #
 # stack-validate.sh is bash, and the minimal-host claim is sh/tar/gzip, so a
@@ -458,11 +469,12 @@ if [ "${SKIP_VALIDATE}" -eq 0 ]; then
     say "--- self-check (loader resolution)"
     env STACK="${ROOT}" GLIBC_FLOOR="${GLIBC_MEASURED}" \
       bash "${ROOT}/libexec/stack-validate.sh" --runtime --stage final "${ROOT}" \
-      || die "${EX_VALIDATE}" "the installed tree failed its own loader check at '${ROOT}'"
+      || die "${EX_VALIDATE}" "the installed tree failed its own loader check.
+  It is LEFT IN PLACE at '${ROOT}' so the failure can be diagnosed -- but it is
+  not trustworthy, and activating it is not a good idea.  The output above names
+  what did not resolve."
   fi
 fi
-
-trap - EXIT INT TERM
 
 #------------------------------------------------------------------------------
 if [ "${MODE}" = extract ]; then
