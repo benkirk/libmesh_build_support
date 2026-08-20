@@ -122,7 +122,11 @@ Three hazards, all of which the obvious implementation walks straight into:
   is to pad the offset itself — `PAYLOAD_OFFSET=0000012345`. POSIX arithmetic then
   reads it as octal, so `$((PAYLOAD_OFFSET + 1))` is 5350 rather than 12346, the
   `.run` extracts from the wrong byte, and it fails as a corrupt payload rather
-  than as a bug. Pad the *line*, never the number.
+  than as a bug. Which of the two ways it fails depends on the digits: an offset
+  containing an 8 or a 9 is not valid octal at all, so `dash` says
+  `Illegal number: 0000019759` and `sh` says `value too great for base` —
+  confusing, but at least loud. Every other offset is silently wrong. Pad the
+  *line*, never the number.
 
 **Getting the offset without a fixpoint:** the header carries the placeholder on a
 line of its own, `PAYLOAD_OFFSET=@PAYLOAD_OFFSET@`. The assembler replaces it with
