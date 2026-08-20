@@ -15,13 +15,14 @@
 # it is not a gate.
 
 .PHONY: all conda wrappers wrappers-check build test relocate validate slim \
-        dist distcheck shell shell-check image-shell print-config conda-lock \
+        dist distcheck installer installer-check shell shell-check image-shell \
+        print-config conda-lock \
         clean distclean help
 
 #-------------------------------------------------------------------------------
 ##@ Pipeline -- 'make all' runs these in order
-## all: the whole workflow, conda through distcheck
-all: distcheck
+## all: the whole workflow, conda through installer-check
+all: distcheck installer-check
 
 $(BUILD_ROOT) $(STACK) $(WORK) $(STAMPS) $(LOGS) $(SRC_CACHE) $(DIST_DIR):
 	$(Q)mkdir -p $@
@@ -188,6 +189,24 @@ distcheck: dist
 	  ISA_BASELINE='$(ISA_BASELINE)' ISA_REPORT='$(WORK)/relocate/isa-scan.json' \
 	  bash test/distcheck.sh
 
+## installer: step 9 -- wrap that same tarball, byte for byte, in a .run
+# The payload is $(TARBALL) unrepacked, so the installer inherits every
+# guarantee distcheck just established.  Repacking would inherit none of them.
+installer: dist
+	$(SAY) RUN '$(notdir $(INSTALLER))'
+	$(Q)env $(PKG_ENV) TARBALL='$(TARBALL)' INSTALLER='$(INSTALLER)' \
+	  DIST_NAME='$(DIST_NAME)' DIST_VERSION='$(DIST_VERSION)' \
+	  bash relocate/make-installer.sh
+
+## installer-check: step 10 -- prove the .run on a deep path containing a space
+installer-check: installer
+	$(SAY) CHECK 'the installer refuses, extracts and validates'
+	$(Q)env $(PKG_ENV) TARBALL='$(TARBALL)' INSTALLER='$(INSTALLER)' \
+	  DIST_NAME='$(DIST_NAME)' DIST_VERSION='$(DIST_VERSION)' \
+	  SMOKE_RANKS='$(SMOKE_RANKS)' GLIBC_FLOOR='$(GLIBC_FLOOR)' \
+	  ISA_BASELINE='$(ISA_BASELINE)' \
+	  bash test/installer-check.sh
+
 #-------------------------------------------------------------------------------
 ##@ Gates -- always re-run, and each is seconds rather than minutes
 ## wrappers-check: prove the wrappers cap the ISA, by scanning what they emit
@@ -257,7 +276,7 @@ print-config:
 	  SMOKE_RANKS '$(SMOKE_RANKS)' NPROC '$(NPROC)' MAKE_J_L '$(MAKE_J_L)' \
 	  PACKAGES '$(BUILD_PKGS)' 'PACKAGES (opt)' '$(OPT_PKGS)' \
 	  'PACKAGES (git)' '$(or $(strip $(foreach p,$(PKGS),$(if $(filter git,$(PKG_SOURCE_$(p))),$(p)@$(PKG_GIT_REF_$(p))))),none)' \
-	  TARBALL '$(TARBALL)'
+	  TARBALL '$(TARBALL)' INSTALLER '$(INSTALLER)'
 
 #-------------------------------------------------------------------------------
 ## conda-lock: regenerate the checked-in explicit lock files

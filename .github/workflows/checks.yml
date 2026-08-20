@@ -47,6 +47,17 @@ jobs:
           command -v shellcheck >/dev/null || sudo apt-get -qq install -y shellcheck
           git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
 
+      # The installer header is the one shell script a CUSTOMER runs, and it is
+      # the one the loop above cannot see: it is *.sh.in, because it carries
+      # @PLACEHOLDER@ substitutions, so 'git ls-files "*.sh"' skips it.  Check
+      # it explicitly, and as POSIX sh rather than bash -- the whole
+      # minimal-host claim is that it needs no bash.
+      - name: The installer header is valid POSIX sh
+        run: |
+          sh -n relocate/installer-header.sh.in
+          command -v shellcheck >/dev/null || sudo apt-get -qq install -y shellcheck
+          shellcheck --severity=warning --shell=sh relocate/installer-header.sh.in
+
       # .github/scripts/ as well as relocate/: the summary renderer runs in a
       # job that only executes after a 50-minute build, so a syntax error there
       # is discovered at the worst possible moment and on the run least able to

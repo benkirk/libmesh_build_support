@@ -92,7 +92,6 @@ services:
     volumes:
       - ../dist:/dist:ro
       - ../test:/verify/test:ro
-      - ../relocate:/verify/relocate:ro
     # Unpack at a different depth, validate with the LOADER ONLY, then run the
     # prebuilt binaries.  --runtime rather than --full is not a shortcut: this
     # image has no python and no binutils, which is exactly the point -- it is
@@ -108,8 +107,69 @@ services:
         echo "unpacking $$(basename $$t) at a different path depth"
         mkdir -p /verify/a/b/c && tar -xzf "$$t" -C /verify/a/b/c
         S=/verify/a/b/c/stack
-        bash /verify/relocate/validate.sh --runtime --stage final "$$S"
+        bash "$$S/libexec/stack-validate.sh" --runtime --stage final "$$S"
         STACK="$$S" WORK=/tmp/verify-work bash /verify/test/run.sh relocated
+        # And the .run, on the same poor image, in the same job.  BOTH legs,
+        # not "prefer the .run": falling back to the tarball only when no .run
+        # is present would quietly retire the path distcheck and A38 were won
+        # on.  This leg needs nothing mounted but /dist, which is the
+        # minimal-host claim stated as a test rather than as a sentence.
+        r=$$(ls -1 /dist/*.run 2>/dev/null | head -1)
+        if [ -n "$$r" ]; then
+          echo
+          echo "=== the installer, on this same image"
+          # Every phase is bounded and named.  Without this a hang surfaces as
+          # a job cancelled at the 30-minute mark with NO log retrievable at
+          # all -- which is exactly how the first version of this leg failed on
+          # aarch64, and why it could not be diagnosed from CI.  A bounded
+          # phase turns that into one line naming what stopped.
+          # 'rc=$$?' after 'if ! cmd' is ALWAYS 0 -- the '!' inverts the status
+          # before $$? is read, so the first version of this reported
+          # "FAILED ... (exit 0)" on a real SIGTERM.  Capture with '|| rc=$$?'.
+          phase () {
+            lim=$$1; name=$$2; shift 2
+            echo "--- [$${name}] (limit $${lim}s)"
+            rc=0
+            timeout "$${lim}" "$$@" || rc=$$?
+            [ "$$rc" -eq 0 ] && return 0
+            case "$$rc" in
+              124) echo "::error::the .run leg HUNG in [$${name}] (over $${lim}s)" >&2 ;;
+              # 143/130 are the runner going away underneath us -- GitHub
+              # reclaiming the machine, not the installer misbehaving.  Naming
+              # it stops the next person debugging the wrong thing.
+              143) echo "::error::[$${name}] killed by SIGTERM: the RUNNER shut down, not the installer" >&2 ;;
+              130) echo "::error::[$${name}] killed by SIGINT: the RUNNER shut down, not the installer" >&2 ;;
+              *)   echo "::error::the .run leg FAILED in [$${name}] (exit $${rc})" >&2 ;;
+            esac
+            exit "$$rc"
+          }
+          phase  60 info    sh "$$r" --info
+          phase 300 check   sh "$$r" --check
+          # --skip-validate, and the reason is measured rather than assumed.
+          #
+          # The .run's post-install self-check re-runs validate.sh --runtime,
+          # which execs ld.so over every one of ~340 objects.  Leg 1 above has
+          # just done exactly that scan, over byte-identical content.  Doing it
+          # a second time in the same job is not merely redundant, it is
+          # pathologically slow: on the runs that survived it took 226s against
+          # leg 1's 53s on the same machine, and on the runs that did not it was
+          # still going after twenty minutes, against a leg 1 that finished in
+          # forty seconds.  Two 500 MB trees do not both fit in the runner's
+          # page cache, so the second pass faults every object in from cold
+          # disk.  It looked like a hang for three CI rounds; it was slowness.
+          #
+          # Coverage is not lost.  The self-check is gated by installer-check
+          # under 'make all', in the builder image, where it belongs.  What this
+          # matrix is for is the minimal-host claim -- that a pristine image with
+          # only sh, tar and gzip can be refused or installed to -- and the
+          # smoke below still proves the installed --prefix layout runs.
+          phase 600 install sh "$$r" --prefix "/verify/i n s/t/a l l" --skip-validate
+          phase 900 smoke   env STACK="/verify/i n s/t/a l l" \
+                                WORK=/tmp/verify-run \
+                                bash /verify/test/run.sh relocated
+        else
+          echo "(no .run in /dist -- tarball leg only)"
+        fi
 
 volumes:
   build-root:

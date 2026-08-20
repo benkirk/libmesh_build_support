@@ -16,9 +16,11 @@ build, relocate, prune and validate machinery covers them.
 
 ## Using the artifact
 
-The tarball is `libmesh-stack-<version>-<platform>-<blas>-glibc<floor>.tar.gz`,
-with one top-level `stack/`. Every `ci` run on `main` publishes it as a
-workflow artifact for 14 days; or build it yourself (next section).
+Two forms of the same thing, published together: a tarball
+`libmesh-stack-<version>-<platform>-<blas>-glibc<floor>.tar.gz` with one
+top-level `stack/`, and a `.run` installer whose payload **is** that tarball,
+byte for byte. Every `ci` run on `main` publishes both for 14 days, with
+`SHA256SUMS`; or build them yourself (next section).
 
 ```sh
 tar xzf libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.tar.gz
@@ -27,6 +29,20 @@ tar xzf libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.tar.gz
 libmesh-config --cxx --cppflags --libs     # or: pkg-config --libs libmesh PETSc
 mpiexec -n 4 stack/libexec/introduction_ex4 -d 2 -n 15
 ```
+
+The `.run` is the same tree, plus a preflight that refuses a host that cannot
+run it — glibc under the measured floor, a CPU under the ISA baseline, no disk,
+no `gzip` — **before** writing 100+ MB, rather than as `Illegal instruction` in
+someone's batch job. `--prefix DIR` installs *as* `DIR`.
+
+```sh
+sh libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.run --info    # what it is
+sh libmesh-stack-0.1.0-linux-64-openblas-glibc2.28.run --prefix /opt/libmesh-stack
+. /opt/libmesh-stack/activate.sh
+```
+
+It needs only `sh`, a GNU-or-compatible `tar`, and `gzip`; `--help` lists the
+rest, and it exits 3 on an unsuitable host, 4 on a checksum mismatch.
 
 `activate.sh` finds its own root and never sets `LD_LIBRARY_PATH` — every
 object carries its RPATH. `stack/etc/stack-manifest.json` records what is
