@@ -687,12 +687,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Publish the tarball
+      # The tarball, the .run that wraps it, and the checksums for both.  One
+      # artifact rather than three, because the verify job downloads it whole
+      # and runs both legs against what it finds.
+      - name: Publish the tarball and the installer
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.run
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
 

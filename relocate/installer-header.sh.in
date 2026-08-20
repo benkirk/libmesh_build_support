@@ -112,7 +112,7 @@ host_glibc () {
 # The ISA table.
 #
 # ISA_BASELINE is a knob (mk/common.mk), not a constant, so this is a table and
-# an UNKNOWN BASELINE REFUSES.  Passing everything on an unrecognised value
+# an UNKNOWN BASELINE REFUSES.  Passing everything on an unrecognized value
 # would silently switch the check off the first time someone raises the knob --
 # and A21 is the amendment that exists because conda-forge ships unguarded LSE
 # atomics in libraries we do not build, so an under-spec CPU really does die
