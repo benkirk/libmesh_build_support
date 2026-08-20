@@ -78,6 +78,9 @@ export CONDA_PKGS_DIRS ?= $(CONDA_HOME)/pkgs
 ISA_BASELINE := $(if $(filter linux-aarch64,$(TARGET_PLATFORM)),$(ISA_BASELINE_AARCH64),$(ISA_BASELINE_X86))
 
 TARBALL := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).tar.gz
+# The self-extracting installer wraps exactly that tarball, so the names differ
+# only in the suffix -- deliberately, because they are the same artifact.
+INSTALLER := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).run
 
 #-------------------------------------------------------------------------------
 # Parallelism.  Carried over from the old build_config.sh.in.

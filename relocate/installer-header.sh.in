@@ -1,0 +1,481 @@
+#!/bin/sh
+# relocate/installer-header.sh.in -- the shell header of the .run installer.
+#
+# A .run is three things concatenated:  [this header] [marker line] [tarball].
+# The payload is the byte-for-byte tarball that `make distcheck` proved, so this
+# file adds exactly three things a plain `tar xzf` cannot: a preflight that
+# REFUSES an unsuitable host before writing 100+ MB, an integrity check, and a
+# prefix convention that matches what people already type.
+#
+# Constraints, all load-bearing:
+#
+#   POSIX sh.  Not bash.  The minimal-host claim is `sh`, a GNU-or-compatible
+#   `tar`, and `gzip` -- nothing here may need more.
+#
+#   The header MUST end in `exit 0`.  sh reads a script in blocks; without a
+#   terminating exit it can read on into the payload, on some shells, on some
+#   block boundaries.  That is the worst possible way to find out.
+#
+#   The payload is located by BYTE OFFSET, never by searching for the marker.
+#   The marker string appears in this header too, and awk takes the first match.
+#
+#   PAYLOAD_OFFSET is substituted LAST, at a fixed field width, and is never
+#   zero-padded: `$((0000012345 + 1))` is octal, and 0000012345 + 1 = 5350.
+#   The assembler pads with a trailing comment instead, so the width is stable
+#   and the value stays decimal.  See relocate/make-installer.sh.
+#
+# Placeholders are of the form at-NAME-at and are substituted by make-installer.sh.
+set -eu
+
+PAYLOAD_OFFSET=@PAYLOAD_OFFSET@
+PAYLOAD_SHA256='@PAYLOAD_SHA256@'
+PAYLOAD_BYTES='@PAYLOAD_BYTES@'
+INSTALLED_KB='@INSTALLED_KB@'
+DIST_NAME='@DIST_NAME@'
+DIST_VERSION='@DIST_VERSION@'
+TARGET_PLATFORM='@TARGET_PLATFORM@'
+GLIBC_MEASURED='@GLIBC_MEASURED@'
+GLIBC_REQUESTED='@GLIBC_REQUESTED@'
+ISA_BASELINE='@ISA_BASELINE@'
+BLAS_PROVIDER='@BLAS_PROVIDER@'
+MPI_PROVIDER='@MPI_PROVIDER@'
+PROFILE='@PROFILE@'
+PACKAGE_COUNT='@PACKAGE_COUNT@'
+GIT_SHA='@GIT_SHA@'
+BUILD_DATE='@BUILD_DATE@'
+
+
+# Exit codes.  A batch install branches on WHY, not on a log.
+EX_USAGE=2      # bad arguments, or invoked in a way that cannot work
+EX_HOST=3       # preflight refused: this host cannot run the artifact
+EX_INTEGRITY=4  # the payload is not what was shipped
+EX_EXTRACT=5    # tar failed
+EX_VALIDATE=6   # extracted, but the post-install self-check failed
+
+QUIET=0
+say  () { [ "${QUIET}" -eq 1 ] || printf '%s\n' "$*"; }
+warn () { printf 'warning: %s\n' "$*" >&2; }
+die  () { code=$1; shift; printf '%s: %s\n' "${DIST_NAME}" "$*" >&2; exit "${code}"; }
+
+#------------------------------------------------------------------------------
+# Where are we?
+#
+# $0 is how this script reads its own payload, so anything that makes $0 not be
+# this file makes the installer unusable.  `curl ... | sh` is the common one:
+# $0 is then the shell, and the failure without this check is a confusing error
+# about a missing file rather than the true statement that it cannot work.
+SELF="$0"
+case "${SELF}" in
+  sh|-sh|bash|-bash|dash|-dash|ksh|zsh|*/sh|*/bash|*/dash|*/ksh|*/zsh)
+    die "${EX_USAGE}" "this installer must be run as a file, not piped into a shell.
+  Download it first, then:  sh ${DIST_NAME}-${DIST_VERSION}-....run --help" ;;
+esac
+[ -r "${SELF}" ] || die "${EX_USAGE}" "cannot read myself at '${SELF}'"
+case "${SELF}" in
+  /*) ;;
+   *) SELF="$(cd "$(dirname "${SELF}")" && pwd)/$(basename "${SELF}")" ;;
+esac
+
+payload () { tail -c "+$((PAYLOAD_OFFSET + 1))" "${SELF}"; }
+
+#------------------------------------------------------------------------------
+# Version comparison, numeric and field by field.
+#
+# Not string comparison and not `sort -V`: as strings "2.9" sorts above "2.34",
+# which would refuse a host that is four years newer than the floor, and sort -V
+# is a GNU extension we have no reason to require.
+ver_ge () {  # ver_ge A B  ->  0 if A >= B
+  _a="$1"; _b="$2"
+  while [ -n "${_a}" ] || [ -n "${_b}" ]; do
+    _x="${_a%%.*}"; _y="${_b%%.*}"
+    _x="$(printf '%s' "${_x}" | tr -cd '0-9')"
+    _y="$(printf '%s' "${_y}" | tr -cd '0-9')"
+    [ -n "${_x}" ] || _x=0
+    [ -n "${_y}" ] || _y=0
+    if [ "${_x}" -gt "${_y}" ]; then return 0; fi
+    if [ "${_x}" -lt "${_y}" ]; then return 1; fi
+    case "${_a}" in *.*) _a="${_a#*.}" ;; *) _a="" ;; esac
+    case "${_b}" in *.*) _b="${_b#*.}" ;; *) _b="" ;; esac
+  done
+  return 0
+}
+
+host_glibc () {
+  _v="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $NF}')"
+  if [ -z "${_v}" ]; then
+    _v="$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
+  fi
+  printf '%s' "${_v}"
+}
+
+#------------------------------------------------------------------------------
+# The ISA table.
+#
+# ISA_BASELINE is a knob (mk/common.mk), not a constant, so this is a table and
+# an UNKNOWN BASELINE REFUSES.  Passing everything on an unrecognised value
+# would silently switch the check off the first time someone raises the knob --
+# and A21 is the amendment that exists because conda-forge ships unguarded LSE
+# atomics in libraries we do not build, so an under-spec CPU really does die
+# with SIGILL rather than merely running slowly.
+#
+# Names are as the KERNEL prints them in /proc/cpuinfo, which is not always what
+# the compiler calls them: SSE3 appears as 'pni', and NEON dot product as
+# 'asimddp'.  x86-64-v2 also implies sse3/pni, but sse4_1 implies it in turn and
+# the shorter list is the one that cannot go wrong on an odd kernel.
+isa_required () {
+  case "$1" in
+    x86-64|x86-64-v1)   printf '' ;;
+    x86-64-v2)          printf 'cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3' ;;
+    x86-64-v3)          printf 'cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3 avx avx2 bmi1 bmi2 f16c fma movbe' ;;
+    x86-64-v4)          printf 'cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3 avx avx2 bmi1 bmi2 f16c fma movbe avx512f avx512bw avx512cd avx512dq avx512vl' ;;
+    armv8-a|armv8|aarch64) printf '' ;;
+    armv8.1-a)          printf 'atomics' ;;
+    armv8.2-a)          printf 'atomics asimddp' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The kernel's flag line: 'flags' on x86, 'Features' on aarch64.
+cpu_flags () {
+  [ -r /proc/cpuinfo ] || return 1
+  awk -F': ' '/^flags[ \t]*:|^Features[ \t]*:/ { print $2; exit }' /proc/cpuinfo
+}
+
+existing_ancestor () {  # df on a path that does not exist yet fails, and the
+  _d="$1"               # prefix is precisely the thing we have not created.
+  while [ ! -d "${_d}" ]; do
+    _p="$(dirname "${_d}")"
+    if [ "${_p}" = "${_d}" ]; then break; fi
+    _d="${_p}"
+  done
+  printf '%s' "${_d}"
+}
+
+#------------------------------------------------------------------------------
+# Integrity.
+#
+# Degrade, do not block.  gzip's CRC and tar's own structure already catch
+# CORRUPTION, so this checksum is the tamper check rather than the integrity
+# check, and a missing tool must not refuse an install that is about to verify
+# itself anyway.  `--check` on its own is the exception: there the user asked
+# for exactly this answer, so having no answer is a failure.
+payload_sha () {
+  if   command -v sha256sum >/dev/null 2>&1; then payload | sha256sum | cut -d' ' -f1
+  elif command -v shasum    >/dev/null 2>&1; then payload | shasum -a 256 | cut -d' ' -f1
+  elif command -v openssl   >/dev/null 2>&1; then payload | openssl dgst -sha256 2>/dev/null | sed 's/.*[= ]//'
+  else return 1
+  fi
+}
+
+check_integrity () {  # $1 = 1 when the user asked for this specifically
+  _strict="$1"
+  if _got="$(payload_sha)"; then
+    if [ "${_got}" = "${PAYLOAD_SHA256}" ]; then
+      say "  integrity : ok (sha256 ${PAYLOAD_SHA256})"
+    else
+      die "${EX_INTEGRITY}" "payload checksum mismatch
+  expected ${PAYLOAD_SHA256}
+  got      ${_got}
+  This file is not the one that was shipped.  Do not install it."
+    fi
+  elif [ "${_strict}" -eq 1 ]; then
+    die "${EX_INTEGRITY}" "no sha256 tool (sha256sum, shasum, openssl) -- cannot answer --check"
+  else
+    warn "no sha256 tool found; skipping the tamper check (gzip's CRC still applies)"
+  fi
+}
+
+#------------------------------------------------------------------------------
+usage () {
+  cat <<USAGE
+${DIST_NAME} ${DIST_VERSION} (${TARGET_PLATFORM}) -- self-extracting installer
+
+  sh $(basename "${SELF}") [--prefix DIR] [options]
+
+  --prefix DIR      install AS DIR; activate.sh lands at DIR/activate.sh.
+                    Default: \$PWD/${DIST_NAME}-${DIST_VERSION}
+  --extract-only    unpack the literal DIR/stack layout instead of installing
+  --dest DIR        where --extract-only unpacks (default: \$PWD)
+  --force           allow a non-empty prefix
+  --skip-validate   do not run the post-install self-check
+  --confirm         prompt before writing (default is non-interactive)
+  -b, --batch       quiet and never prompt
+  --check           verify the embedded checksum and exit
+  --list            list the payload and exit
+  --info            print what this artifact is and exit
+  --version         print the version and exit
+  --quiet           less output
+  --help            this
+
+Exit codes: 0 ok, ${EX_USAGE} usage, ${EX_HOST} host unsuitable, ${EX_INTEGRITY} integrity,
+            ${EX_EXTRACT} extraction, ${EX_VALIDATE} post-install validation.
+USAGE
+}
+
+info () {
+  cat <<INFO
+name              ${DIST_NAME}
+version           ${DIST_VERSION}
+platform          ${TARGET_PLATFORM}
+profile           ${PROFILE}
+blas              ${BLAS_PROVIDER}
+mpi               ${MPI_PROVIDER}
+glibc floor       measured ${GLIBC_MEASURED} (requested ${GLIBC_REQUESTED})
+isa baseline      ${ISA_BASELINE}
+packages          ${PACKAGE_COUNT}
+built             ${BUILD_DATE}
+source            ${GIT_SHA}
+payload           ${PAYLOAD_BYTES} bytes, sha256 ${PAYLOAD_SHA256}
+installed size    ${INSTALLED_KB} KB
+INFO
+}
+
+#------------------------------------------------------------------------------
+PREFIX=""
+DEST=""
+MODE=install
+FORCE=0
+SKIP_VALIDATE=0
+CONFIRM=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix)       [ $# -ge 2 ] || die "${EX_USAGE}" "--prefix needs a directory"; PREFIX="$2"; shift ;;
+    --prefix=*)     PREFIX="${1#*=}" ;;
+    -p)             [ $# -ge 2 ] || die "${EX_USAGE}" "-p needs a directory"; PREFIX="$2"; shift ;;
+    --dest)         [ $# -ge 2 ] || die "${EX_USAGE}" "--dest needs a directory"; DEST="$2"; shift ;;
+    --dest=*)       DEST="${1#*=}" ;;
+    --extract-only) MODE=extract ;;
+    --force|-f)     FORCE=1 ;;
+    --skip-validate) SKIP_VALIDATE=1 ;;
+    --confirm)      CONFIRM=1 ;;
+    -b|--batch)     QUIET=1; CONFIRM=0 ;;
+    --quiet|-q)     QUIET=1 ;;
+    --check)        MODE=check ;;
+    --list)         MODE=list ;;
+    --info)         MODE=info ;;
+    --version)      printf '%s %s (%s)\n' "${DIST_NAME}" "${DIST_VERSION}" "${TARGET_PLATFORM}"; exit 0 ;;
+    --help|-h)      usage; exit 0 ;;
+    *)              usage >&2; die "${EX_USAGE}" "unknown option: $1" ;;
+  esac
+  shift
+done
+
+case "${MODE}" in
+  info) info; exit 0 ;;
+  check)
+    command -v tar  >/dev/null 2>&1 || die "${EX_HOST}" "no 'tar' on this host"
+    check_integrity 1
+    exit 0 ;;
+  list)
+    command -v tar  >/dev/null 2>&1 || die "${EX_HOST}" "no 'tar' on this host"
+    command -v gzip >/dev/null 2>&1 || die "${EX_HOST}" "no 'gzip' on this host"
+    payload | tar -tzf -
+    exit 0 ;;
+esac
+
+#------------------------------------------------------------------------------
+# Preflight.  Everything that can refuse, refuses HERE -- before a single byte
+# is written.  That is the entire reason this file exists rather than a tarball.
+say "=== ${DIST_NAME} ${DIST_VERSION} (${TARGET_PLATFORM})"
+say "--- preflight"
+
+# Tools.  gzip is named separately from tar because A38: opensuse/leap:15 ships
+# tar WITHOUT gzip, GNU tar's -z execs gzip, and the resulting
+# "tar (child): gzip: Cannot exec" reads like a corrupt download.
+command -v tar  >/dev/null 2>&1 || die "${EX_HOST}" "no 'tar' on this host; install tar and retry"
+command -v gzip >/dev/null 2>&1 || die "${EX_HOST}" \
+  "no 'gzip' on this host.  tar is present, but tar -z runs gzip as a child, so
+  extraction would fail with a message that looks like a corrupt download.
+  Install gzip and retry."
+# --strip-components is a GNU extension, not POSIX -- GNU tar, bsdtar and
+# busybox all have it, and all five base images ship GNU tar, so the honest
+# claim is "sh, a GNU-or-compatible tar, gzip".  Probe POSITIVELY: bsdtar
+# supports the option without listing it in --help, so scanning the help text
+# alone would refuse a tar that works.
+tar_has_strip () {
+  if tar --version 2>/dev/null | head -1 | grep -Eqi 'gnu tar|bsdtar|libarchive|busybox'; then return 0; fi
+  if tar --help 2>&1 | grep -q -- '--strip-components'; then return 0; fi
+  return 1
+}
+if [ "${MODE}" = install ]; then
+  if ! tar_has_strip; then
+    die "${EX_HOST}" "this tar looks like it has no --strip-components, which --prefix needs.
+  Use --extract-only --dest DIR for the literal DIR/stack layout instead."
+  fi
+fi
+say "  tools     : tar, gzip"
+
+# glibc, against the MEASURED floor rather than the requested one.  They are not
+# the same number (A4): GLIBC_FLOOR pins only OUR compilations, while every
+# prebuilt conda-forge object carries conda-forge's own baseline, so the
+# effective floor is the max of the two.  Refusing on the request would turn
+# away hosts the artifact demonstrably runs on.
+_hg="$(host_glibc)"
+if [ -z "${_hg}" ]; then
+  warn "cannot determine the host glibc version; skipping the floor check"
+else
+  if ver_ge "${_hg}" "${GLIBC_MEASURED}"; then
+    say "  glibc     : ${_hg} >= ${GLIBC_MEASURED}"
+  else
+    die "${EX_HOST}" "this host has glibc ${_hg}; the artifact needs ${GLIBC_MEASURED} or newer.
+  (That is the floor MEASURED across the shipped objects, not the ${GLIBC_REQUESTED}
+  the build asked for -- see A4.)  Nothing has been written."
+  fi
+fi
+
+# ISA.
+if ! _need="$(isa_required "${ISA_BASELINE}")"; then
+  die "${EX_HOST}" "unknown ISA baseline '${ISA_BASELINE}' -- this installer cannot
+  check whether your CPU is new enough, and passing an unchecked host would
+  hand you a SIGILL in a batch job instead.  Use the .tar.gz, or file a bug."
+fi
+if [ -z "${_need}" ]; then
+  say "  cpu       : ${ISA_BASELINE} (no feature bits to check)"
+elif ! _have="$(cpu_flags)"; then
+  warn "no /proc/cpuinfo; skipping the ${ISA_BASELINE} check"
+else
+  _missing=""
+  for _f in ${_need}; do
+    case " ${_have} " in
+      *" ${_f} "*) ;;
+      *) _missing="${_missing} ${_f}" ;;
+    esac
+  done
+  if [ -n "${_missing}" ]; then
+    die "${EX_HOST}" "this CPU is below the ${ISA_BASELINE} baseline the artifact was built for.
+  missing:${_missing}
+  These are not optimization flags: prebuilt libraries here use them
+  unguarded, so the binaries would die with SIGILL rather than run slowly.
+  Nothing has been written."
+  fi
+  say "  cpu       : ${ISA_BASELINE} satisfied"
+fi
+
+#------------------------------------------------------------------------------
+# Resolve where this is going.
+#
+# --prefix DIR installs AS DIR.  This is Miniforge's -p (which this repo itself
+# drives in conda/bootstrap.sh), and Intel's and NVIDIA's convention: someone
+# typing '--prefix /opt/libmesh-stack' and getting /opt/libmesh-stack/stack/
+# would be right to file a bug.  --extract-only keeps the literal DIR/stack
+# layout that `tar xzf` gives, which is what installer-check diffs against.
+if [ "${MODE}" = extract ]; then
+  TARGET="${DEST:-$PWD}"
+  ROOT="${TARGET}/stack"
+  STRIP=0
+else
+  [ -z "${DEST}" ] || die "${EX_USAGE}" "--dest applies to --extract-only; use --prefix to install"
+  TARGET="${PREFIX:-${PWD}/${DIST_NAME}-${DIST_VERSION}}"
+  ROOT="${TARGET}"
+  STRIP=1
+fi
+case "${TARGET}" in /*) ;; *) TARGET="${PWD}/${TARGET}" ;; esac
+case "${ROOT}"   in /*) ;; *) ROOT="${PWD}/${ROOT}" ;; esac
+
+# Writable, and not silently on top of something.
+_anc="$(existing_ancestor "${TARGET}")"
+[ -w "${_anc}" ] || die "${EX_HOST}" "cannot write to '${_anc}' -- pick a --prefix you own, or use sudo"
+if [ -e "${ROOT}" ] && [ "${FORCE}" -eq 0 ]; then
+  if [ -n "$(ls -A "${ROOT}" 2>/dev/null || true)" ]; then
+    die "${EX_HOST}" "'${ROOT}' exists and is not empty; pass --force to install over it"
+  fi
+fi
+say "  prefix    : ${ROOT}"
+
+# Disk, measured at the nearest EXISTING ancestor.
+if _df="$(df -Pk "${_anc}" 2>/dev/null | awk 'NR==2 {print $4}')" && [ -n "${_df}" ]; then
+  if [ "${_df}" -lt "${INSTALLED_KB}" ] 2>/dev/null; then
+    die "${EX_HOST}" "not enough free space on '${_anc}': ${_df} KB free, ${INSTALLED_KB} KB needed.
+  Nothing has been written."
+  fi
+  say "  disk      : $((_df / 1024)) MB free, $((INSTALLED_KB / 1024)) MB needed"
+else
+  warn "cannot measure free space at '${_anc}'; skipping the disk check"
+fi
+
+# Extracting as root rewrites ownership from the tarball's uid/gid 0 entries,
+# which is what makeself's --nochown exists for.  We build with --owner=0
+# --group=0, so root gets a root-owned tree, which is the intent -- but say so,
+# because a tree that silently changed hands is a bad surprise either way.
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+  say "  note      : running as root; the installed tree will be owned by root"
+fi
+
+say "--- integrity"
+check_integrity 0
+
+if [ "${CONFIRM}" -eq 1 ]; then
+  printf 'install %s %s into %s ? [y/N] ' "${DIST_NAME}" "${DIST_VERSION}" "${ROOT}"
+  read -r _ans || _ans=""
+  case "${_ans}" in [yY]*) ;; *) echo "aborted"; exit 0 ;; esac
+fi
+
+#------------------------------------------------------------------------------
+# Extract.
+#
+# A partial tree is worse than none: it looks installed and fails later, in a
+# place with no connection to this.  So a failure here removes what we made --
+# and ONLY what we made, which is why the trap is armed after the decision that
+# we are the ones creating ROOT.
+CREATED=0
+[ -d "${ROOT}" ] || CREATED=1
+cleanup_partial () {
+  _rc=$?
+  if [ "${_rc}" -ne 0 ] && [ "${CREATED}" -eq 1 ] && [ -d "${ROOT}" ]; then
+    rm -rf "${ROOT}" 2>/dev/null || true
+    printf '%s\n' "removed the partial install at ${ROOT}" >&2
+  fi
+  return "${_rc}"
+}
+trap cleanup_partial EXIT INT TERM
+
+say "--- extracting $((PAYLOAD_BYTES / 1048576)) MB"
+mkdir -p "${ROOT}" || die "${EX_EXTRACT}" "cannot create '${ROOT}'"
+if [ "${STRIP}" -eq 1 ]; then
+  payload | tar -xzf - -C "${ROOT}" --strip-components=1 \
+    || die "${EX_EXTRACT}" "extraction failed"
+else
+  payload | tar -xzf - -C "${TARGET}" \
+    || die "${EX_EXTRACT}" "extraction failed"
+fi
+[ -r "${ROOT}/activate.sh" ] || die "${EX_EXTRACT}" "extraction produced no ${ROOT}/activate.sh"
+
+#------------------------------------------------------------------------------
+# Post-install self-check: the tree verifying itself, with no repo present.
+#
+# stack-validate.sh is bash, and the minimal-host claim is sh/tar/gzip, so a
+# host without bash SKIPS this with a notice.  It must never turn a good install
+# into a failed one -- the loader check is a bonus here, not the product.
+if [ "${SKIP_VALIDATE}" -eq 0 ]; then
+  if [ ! -r "${ROOT}/libexec/stack-validate.sh" ]; then
+    say "--- self-check skipped (no libexec/stack-validate.sh in this artifact)"
+  elif ! command -v bash >/dev/null 2>&1; then
+    say "--- self-check skipped: no bash on this host (the stack itself needs only sh)"
+  else
+    say "--- self-check (loader resolution)"
+    env STACK="${ROOT}" GLIBC_FLOOR="${GLIBC_MEASURED}" \
+      bash "${ROOT}/libexec/stack-validate.sh" --runtime --stage final "${ROOT}" \
+      || die "${EX_VALIDATE}" "the installed tree failed its own loader check at '${ROOT}'"
+  fi
+fi
+
+trap - EXIT INT TERM
+
+#------------------------------------------------------------------------------
+if [ "${MODE}" = extract ]; then
+  say ""
+  say "=== extracted to ${ROOT}"
+else
+  say ""
+  say "=== ${DIST_NAME} ${DIST_VERSION} installed at ${ROOT}"
+fi
+# The resolved prefix, not a generic one -- this line is meant to be copied.
+say ""
+say "    . ${ROOT}/activate.sh"
+say ""
+
+# MUST be the last thing the shell reads.  Everything below this line is the
+# marker and then binary payload; without this exit, sh can read on into it.
+exit 0
+__LIBMESH_STACK_PAYLOAD__
