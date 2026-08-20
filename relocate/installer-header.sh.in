@@ -264,7 +264,9 @@ done
 case "${MODE}" in
   info) info; exit 0 ;;
   check)
-    command -v tar  >/dev/null 2>&1 || die "${EX_HOST}" "no 'tar' on this host"
+    # Deliberately does NOT require tar or gzip.  --check only hashes raw
+    # bytes, and the host most likely to need this answer is the one where
+    # something is already wrong.
     check_integrity 1
     exit 0 ;;
   list)
