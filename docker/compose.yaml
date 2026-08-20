@@ -118,11 +118,30 @@ services:
         if [ -n "$$r" ]; then
           echo
           echo "=== the installer, on this same image"
-          sh "$$r" --info
-          sh "$$r" --check
-          sh "$$r" --prefix "/verify/i n s/t/a l l"
-          STACK="/verify/i n s/t/a l l" WORK=/tmp/verify-run \
-            bash /verify/test/run.sh relocated
+          # Every phase is bounded and named.  Without this a hang surfaces as
+          # a job cancelled at the 30-minute mark with NO log retrievable at
+          # all -- which is exactly how the first version of this leg failed on
+          # aarch64, and why it could not be diagnosed from CI.  A bounded
+          # phase turns that into one line naming what stopped.
+          phase () {
+            lim=$$1; name=$$2; shift 2
+            echo "--- [$${name}] (limit $${lim}s)"
+            if ! timeout "$${lim}" "$$@"; then
+              rc=$$?
+              if [ "$$rc" -eq 124 ]; then
+                echo "::error::the .run leg HUNG in [$${name}] (over $${lim}s)" >&2
+              else
+                echo "::error::the .run leg FAILED in [$${name}] (exit $${rc})" >&2
+              fi
+              exit "$$rc"
+            fi
+          }
+          phase  60 info    sh "$$r" --info
+          phase 300 check   sh "$$r" --check
+          phase 600 install sh "$$r" --prefix "/verify/i n s/t/a l l"
+          phase 900 smoke   env STACK="/verify/i n s/t/a l l" \
+                                WORK=/tmp/verify-run \
+                                bash /verify/test/run.sh relocated
         else
           echo "(no .run in /dist -- tarball leg only)"
         fi
