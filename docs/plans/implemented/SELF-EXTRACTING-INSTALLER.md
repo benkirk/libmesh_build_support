@@ -1,9 +1,15 @@
 # Plan: a self-extracting installer for the redistributable stack
 
-**Status:** planned, not started. Pick this up in a fresh session.
+**Status: implemented.** The header is `relocate/installer-header.sh.in` and the
+assembler `relocate/make-installer.sh`; the gate is `test/installer-check.sh`,
+reached by `make installer-check`, which `make all` now ends in; the validator
+ships as `stack/libexec/stack-validate.sh` via `relocate/fixup-text.sh`; the
+`verify` service runs both the tarball and the `.run` on all five base images;
+and `.github/workflows/stack.yml` publishes the `.run` and `SHA256SUMS`
+alongside the tarball.
 
 `A<n>` cites the amendments in
-[`implemented/RELOCATABLE-STACK-PLAN.md`](implemented/RELOCATABLE-STACK-PLAN.md),
+[`RELOCATABLE-STACK-PLAN.md`](RELOCATABLE-STACK-PLAN.md),
 the same convention `docs/DESIGN.md` uses.
 
 ## What this is for
@@ -332,3 +338,36 @@ attestation (a different project, with key management attached); delta or split
 payloads; a modulefile or Spack-package generator; anything Windows or macOS. The
 `.tar.gz` stays either way — the `.run` is additive, and the day it becomes the
 only way to get the stack is the day this was a mistake.
+
+## What implementation changed
+
+Three things the plan had wrong or under-specified, kept here rather than
+silently corrected, because the reasoning is the useful part:
+
+- **The width-stable substitution was going to be a bug.** Padding the offset
+  itself (`PAYLOAD_OFFSET=0000012345`) makes POSIX arithmetic read it as octal:
+  `$((PAYLOAD_OFFSET + 1))` is 5350, verified, not 12346. Offsets containing an
+  8 or a 9 are not valid octal at all and fail loudly instead
+  (`dash: Illegal number`), which means the bug's severity depends on the
+  digits. The assembler pads the *line* with a trailing comment, keeps the value
+  decimal, and re-measures the header afterward, refusing if the length moved.
+- **`ISA_BASELINE` is a knob, so the check had to be a table.** The plan wrote
+  one hardcoded `x86-64-v2` flag list. The header now carries `v2`/`v3`/`v4` and
+  `armv8.1-a`/`8.2-a`, and an unknown baseline **refuses** — passing an
+  unchecked host would switch A21's protection off the first time the knob moved.
+  The flag names are the kernel's, not the compiler's, which is why SSE3 does
+  not appear: `/proc/cpuinfo` calls it `pni`, and `sse4_1` implies it anyway.
+- **The `verify` service runs both legs, not the `.run` in preference.** The
+  plan said "falling back to the tarball path otherwise", which would have
+  retired the path `distcheck` and A38 were won on the moment a `.run` appeared
+  in `dist/`. Both, in the five jobs that already exist.
+
+Smaller ones, each of which would have cost a session: `df` is measured at the
+nearest *existing* ancestor, because the prefix is the thing not yet created;
+version compares are numeric field by field, because `2.9` sorts above `2.34` as
+a string; `--strip-components` is probed positively, because `bsdtar` supports it
+without listing it in `--help`; installed size is read with `tarfile` rather than
+by `awk`-ing `tar -tv`, whose columns differ between GNU tar and bsdtar; and
+`SHA256SUMS` is written from absolute paths, after a first version that hashed
+bare names, worked only because both artifacts share a directory, and failed
+*silently* when they did not.
