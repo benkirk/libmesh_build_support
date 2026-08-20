@@ -212,19 +212,24 @@ Exit codes: 0 ok, ${EX_USAGE} usage, ${EX_HOST} host unsuitable, ${EX_INTEGRITY}
 USAGE
 }
 
+# A blank line in --info reads as a broken installer rather than as an unset
+# field.  git_sha in particular is null whenever the manifest was generated
+# outside a checkout, which is the normal case in the build container.
+shown () { [ -n "$1" ] && printf '%s' "$1" || printf '(not recorded)'; }
+
 info () {
   cat <<INFO
 name              ${DIST_NAME}
 version           ${DIST_VERSION}
 platform          ${TARGET_PLATFORM}
-profile           ${PROFILE}
-blas              ${BLAS_PROVIDER}
-mpi               ${MPI_PROVIDER}
-glibc floor       measured ${GLIBC_MEASURED} (requested ${GLIBC_REQUESTED})
+profile           $(shown "${PROFILE}")
+blas              $(shown "${BLAS_PROVIDER}")
+mpi               $(shown "${MPI_PROVIDER}")
+glibc floor       measured ${GLIBC_MEASURED} (requested $(shown "${GLIBC_REQUESTED}"))
 isa baseline      ${ISA_BASELINE}
 packages          ${PACKAGE_COUNT}
-built             ${BUILD_DATE}
-source            ${GIT_SHA}
+built             $(shown "${BUILD_DATE}")
+source            $(shown "${GIT_SHA}")
 payload           ${PAYLOAD_BYTES} bytes, sha256 ${PAYLOAD_SHA256}
 installed size    ${INSTALLED_KB} KB
 INFO
