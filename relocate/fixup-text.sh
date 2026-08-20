@@ -301,6 +301,24 @@ if [ -r "${HERE}/../stack/activate.sh.in" ]; then
   echo "fixup: installed activate.sh"
 fi
 
+# The validator, shipped, for the same reason: it belongs to the artifact.
+#
+# Without it the tree can only be checked from a clone of this repo, which is
+# exactly what the customer does not have -- and the .run's post-install
+# self-check has nothing to run.  --runtime is loader-only and never reaches
+# depsolve.py, so it ships cleanly on its own; --full still needs the repo, and
+# says so when it cannot find its sibling.
+#
+# It is bash, and the minimal-host claim for the .run is sh/tar/gzip, so the
+# installer SKIPS this with a notice on a bash-less host rather than failing a
+# good install.  That is a deliberate asymmetry: the stack needs sh, its
+# optional self-check needs bash.
+if [ -r "${HERE}/validate.sh" ]; then
+  install -d -m 0755 "${STACK}/libexec"
+  install -m 0755 "${HERE}/validate.sh" "${STACK}/libexec/stack-validate.sh"
+  echo "fixup: installed libexec/stack-validate.sh"
+fi
+
 #------------------------------------------------------------------------------
 # Inventory whatever still names the build prefix.  Deliberately scans BINARY
 # files too: 'grep -rI' skips them, which would hide a prefix baked into an ELF

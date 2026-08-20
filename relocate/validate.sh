@@ -290,6 +290,14 @@ else
   [ -x "${PY}" ] || PY="$(command -v python3 || true)"
   [ -x "${PY}" ] || { echo "  FAIL  no python for depsolve.py" >&2; exit 1; }
 
+  # This script also ships INSIDE the artifact, as stack/libexec/stack-validate.sh,
+  # where depsolve.py is not its sibling -- only --runtime is self-contained.
+  # Say which mode is available rather than dying on a missing file.
+  [ -r "${HERE}/depsolve.py" ] || {
+    echo "  FAIL  no depsolve.py beside this script (${HERE})." >&2
+    echo "        --full needs the repo; the shipped copy supports --runtime." >&2
+    exit 1; }
+
   rep="$(mktemp)"
   trap 'rm -f "${rep}"' EXIT
   "${PY}" "${HERE}/depsolve.py" scan --root "${ROOT}" --brief > "${rep}"

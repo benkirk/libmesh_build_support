@@ -92,7 +92,6 @@ services:
     volumes:
       - ../dist:/dist:ro
       - ../test:/verify/test:ro
-      - ../relocate:/verify/relocate:ro
     # Unpack at a different depth, validate with the LOADER ONLY, then run the
     # prebuilt binaries.  --runtime rather than --full is not a shortcut: this
     # image has no python and no binutils, which is exactly the point -- it is
@@ -108,8 +107,25 @@ services:
         echo "unpacking $$(basename $$t) at a different path depth"
         mkdir -p /verify/a/b/c && tar -xzf "$$t" -C /verify/a/b/c
         S=/verify/a/b/c/stack
-        bash /verify/relocate/validate.sh --runtime --stage final "$$S"
+        bash "$$S/libexec/stack-validate.sh" --runtime --stage final "$$S"
         STACK="$$S" WORK=/tmp/verify-work bash /verify/test/run.sh relocated
+        # And the .run, on the same poor image, in the same job.  BOTH legs,
+        # not "prefer the .run": falling back to the tarball only when no .run
+        # is present would quietly retire the path distcheck and A38 were won
+        # on.  This leg needs nothing mounted but /dist, which is the
+        # minimal-host claim stated as a test rather than as a sentence.
+        r=$$(ls -1 /dist/*.run 2>/dev/null | head -1)
+        if [ -n "$$r" ]; then
+          echo
+          echo "=== the installer, on this same image"
+          sh "$$r" --info
+          sh "$$r" --check
+          sh "$$r" --prefix "/verify/i n s/t/a l l"
+          STACK="/verify/i n s/t/a l l" WORK=/tmp/verify-run \
+            bash /verify/test/run.sh relocated
+        else
+          echo "(no .run in /dist -- tarball leg only)"
+        fi
 
 volumes:
   build-root:
