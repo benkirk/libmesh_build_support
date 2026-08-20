@@ -34,9 +34,9 @@ for forty years, and a wrapper that only wraps it is a worse `tar`.
 ## What is already done
 
 `make dist` builds the relocatable `stack/` tree and tars it reproducibly
-(`mk/stages.mk:179-185`) into
+(`mk/stages.mk:175-181`) into
 `dist/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).tar.gz`
-(`mk/common.mk:62`). `make distcheck` then *proves* that tarball: it unpacks at a
+(`mk/common.mk:80`). `make distcheck` then *proves* that tarball: it unpacks at a
 different path depth, under a directory whose name contains a space, moves the
 original aside so nothing resolves back to it, validates, runs the prebuilt
 binaries, and repeats read-only (`test/distcheck.sh`). The unpacked tree
@@ -69,14 +69,14 @@ writing). That is not nothing, and most of it is UX we now have to write.
 **What decides it, in order:**
 
 - **Payload identity.** `makeself` tars a *directory*. Pointing it at `$STACK`
-  creates a second packing path that can drift from `mk/stages.mk:182-184`, and
+  creates a second packing path that can drift from `mk/stages.mk:178-180`, and
   re-opens reproducibility, which then has to be re-established through
   `--tar-extra` and `--packaging-date`. Nesting our existing `.tar.gz` inside a
   `makeself` archive instead preserves identity — but the archive stages its
   payload through a temporary directory before the startup script runs, so a
   111 MB artifact costs a full extra copy on disk and double the I/O, on hosts
   whose `/tmp` we do not control. `tail -c +N "$0" | tar -xzf - -C "$prefix"`
-  materialises nothing.
+  materializes nothing.
 - **Ordering.** `makeself`'s startup script runs *after* extraction.
   `--notemp` / `--current` / runtime `--target` change *where*, not *when*. Goal 1
   requires before. We would be fighting the tool over its central design choice,
@@ -86,7 +86,7 @@ writing). That is not nothing, and most of it is UX we now have to write.
   (`docker/bases.env`). That is ~1600 lines of generality bought for none of it.
 
 **And what we therefore owe:** progress output, traps that clean up a partial
-extraction, umask and chown-as-root behaviour (`makeself` has `--nochown` for a
+extraction, umask and chown-as-root behavior (`makeself` has `--nochown` for a
 reason — extracting as root can rewrite ownership in ways the caller did not
 ask for), and a documented exit-code table. These are header requirements below,
 not omissions.
@@ -104,10 +104,12 @@ A `.run` is three things concatenated into one executable file:
    `tail -c +$((OFFSET + 1)) "$0"`.
 3. That streams into the extractor:
    `tail -c +$((OFFSET + 1)) "$0" | tar -xzf - -C "$prefix"`. `$0` is the script
-   itself, which is how it reads its own payload.
+   itself, which is how it reads its own payload — and therefore `curl … | sh` can
+   never work, because `$0` is then the shell. The header refuses that by name
+   (exit 2) rather than reading a nonexistent file.
 4. Everything else is header: preflight, checksum, argument parsing, output.
 
-Two hazards, both of which the obvious implementation walks straight into:
+Three hazards, all of which the obvious implementation walks straight into:
 
 - **Marker self-match.** The usual trick —
   `N=$(awk '/^__PAYLOAD_BELOW__$/{print NR+1; exit}' "$0")` — searches for a
@@ -116,11 +118,20 @@ Two hazards, both of which the obvious implementation walks straight into:
   `head`) can see; just do not compute from it.
 - **`awk` over binary.** Line-scanning a mostly-binary file is a locale and NUL
   hazard for no benefit once the offset is known at assembly time.
+- **Leading zeros are octal.** The tempting way to hold the header's width stable
+  is to pad the offset itself — `PAYLOAD_OFFSET=0000012345`. POSIX arithmetic then
+  reads it as octal, so `$((PAYLOAD_OFFSET + 1))` is 5350 rather than 12346, the
+  `.run` extracts from the wrong byte, and it fails as a corrupt payload rather
+  than as a bug. Pad the *line*, never the number.
 
-**Getting the offset without a fixpoint:** substitute `@PAYLOAD_OFFSET@` with a
-zero-padded fixed-width number (`0000000000`), measure the assembled header's
-byte length, then substitute the real value *at the same width*. The length does
-not change, so one measurement pass is exact. No iteration, no guessing.
+**Getting the offset without a fixpoint:** the header carries the placeholder on a
+line of its own, `PAYLOAD_OFFSET=@PAYLOAD_OFFSET@`. The assembler replaces it with
+the decimal offset **right-padded to a fixed width with spaces** —
+`PAYLOAD_OFFSET=0             ` at ten columns — measures the assembled header's
+byte length, then substitutes the real value at the same total width. Trailing
+spaces are not part of the value, so no leading zero ever reaches `$(( ))`; the
+length does not change, so one measurement pass is exact. No iteration, no
+guessing, and `installer-check`'s payload-identity diff is what proves it.
 
 ## Design in this repo
 
@@ -154,16 +165,28 @@ Every check below needs only `/proc`, `df` and shell:
 - **glibc** — the host's (`getconf GNU_LIBC_VERSION`, else `ldd --version`) against
   the baked-in **`glibc_floor_measured`**. Measured, not requested: the manifest
   records both because they are not the same number
-  (`relocate/validate.sh:390-391`; 2.27 measured against a 2.28 request, per the
+  (`relocate/validate.sh:475-476`; 2.27 measured against a 2.28 request, per the
   README table). Refusing on the requested floor would turn away hosts the
   artifact demonstrably runs on — and A4 is the amendment that exists because that
   distinction was learned the hard way.
-- **ISA** — `x86-64-v2` needs `cx16 lahf_lm popcnt sse3 sse4_1 sse4_2 ssse3` in
-  `/proc/cpuinfo` `flags`; `armv8.1-a` needs `atomics` (LSE) in `Features`. The
+- **ISA** — against the baked-in `isa_baseline`, which is a knob and not a
+  constant (`mk/common.mk:48-49`, resolved at `:78`), so the header carries a
+  table rather than one hardcoded list: `x86-64-v2` needs
+  `cx16 lahf_lm popcnt sse3 sse4_1 sse4_2 ssse3` in `/proc/cpuinfo` `flags`, `v3`
+  adds `avx avx2 bmi1 bmi2 f16c fma movbe`, `v4` adds the `avx512` set;
+  `armv8.1-a` needs `atomics` (LSE) in `Features` and `armv8.2-a` adds `asimddp`.
+  A baseline the table does not know **refuses** (exit 3) — passing everything
+  would silently turn the check off the first time someone raises the knob. The
   aarch64 case is A21 exactly: conda-forge emits unguarded LSE atomics in
   libraries we do not build, so "it is only a compiler flag" is false and the
   binary really will not run.
-- **Disk** — `df -Pk "$prefix"` against a baked-in installed size.
+- **Disk** — `df -Pk` against a baked-in installed size, measured at the nearest
+  **existing** ancestor of the prefix. `df` on a path that does not exist yet
+  fails, and the prefix is exactly the thing we have not created.
+- **glibc and version compares are numeric, field by field.** `2.9` sorts above
+  `2.34` as a string, which would refuse a perfectly good host — so split on `.`
+  and compare as integers, never with `[ "$a" \> "$b" ]` or `sort -V`, which is
+  not guaranteed present.
 - **Prefix** — writable; refuse a non-empty target unless `--force`.
 - **Tools** — `tar` *and* `gzip`. A38 is the reason `gzip` is named separately:
   `opensuse/leap:15` ships `tar` without it, GNU tar's `-z` execs `gzip`, and the
@@ -184,7 +207,10 @@ Every check below needs only `/proc`, `df` and shell:
   NVIDIA's convention — a customer typing `--prefix /opt/libmesh-stack` and
   getting `/opt/libmesh-stack/stack/` would be right to file a bug. The assembler
   asserts the tarball has exactly one top-level entry, `stack/`, so the strip can
-  never be silently wrong.
+  never be silently wrong. Note that `--strip-components` is a GNU extension, not
+  POSIX: GNU tar, bsdtar and busybox all have it, and all five base images ship
+  GNU tar, so the narrowed claim is "`sh`, GNU-or-compatible `tar`, `gzip`" and
+  the preflight says so when it refuses.
 - Default prefix `$PWD/<DIST_NAME>-<DIST_VERSION>`. Never splat into `$PWD`.
 - **`--extract-only [--dest DIR]`** reproduces the literal `DIR/stack` layout —
   what `tar xzf` gives today. This is the mode `installer-check` diffs against a
@@ -201,7 +227,7 @@ Every check below needs only `/proc`, `df` and shell:
 
 The header's facts are read out of `stack/etc/stack-manifest.json` **inside the
 tarball**, with `tar -xzOf "$TARBALL" stack/etc/stack-manifest.json` — the same
-move CI already makes at `.github/workflows/stack.yml:527`. The `.run` then
+move CI already makes at `.github/workflows/stack.yml:605`. The `.run` then
 describes the artifact rather than the build that was requested, which is the
 distinction A37 was issued over. Bake in: name, version, platform, BLAS/MPI,
 `glibc_floor_measured` *and* `_requested`, `isa_baseline`, `package_count`,
@@ -220,7 +246,9 @@ distinction A37 was issued over. Bake in: name, version, platform, BLAS/MPI,
   `chmod +x`. No timestamps of its own (`SOURCE_DATE_EPOCH`); the payload is the
   reproducible tarball, so the `.run` is reproducible too. Also writes
   `dist/SHA256SUMS` covering both artifacts — the embedded checksum covers the
-  payload, and nothing else covers the header.
+  payload, and nothing else covers the header. It lives here rather than in `dist`
+  because it must name the `.run`; the consequence, stated so it is not a
+  surprise, is that `make dist` alone produces no `SHA256SUMS`.
 - **`test/installer-check.sh`** — the gate, mirroring `test/distcheck.sh` and both
   of its deliberate cruelties (different depth, a space in the path). Runs
   `--check`; installs into `".../a b/c/install"`; sources `activate.sh`; runs the
@@ -233,31 +261,34 @@ distinction A37 was issued over. Bake in: name, version, platform, BLAS/MPI,
 
 ### Files to modify
 
-- **`relocate/fixup-text.sh:285-289`**, where `activate.sh` is installed: also
+- **`relocate/fixup-text.sh:299-302`**, where `activate.sh` is installed: also
   install `relocate/validate.sh` as `stack/libexec/stack-validate.sh`, so the
   *installed* tree can verify itself with no repo present. `--runtime` is
-  loader-only and never reaches `depsolve.py` (`relocate/validate.sh:191`), so it
+  loader-only and never reaches `depsolve.py` (`relocate/validate.sh:291`), so it
   ships cleanly. Two consequences to handle rather than discover:
   - It is `#!/usr/bin/env bash`. On a host without bash the post-extract
     self-check is **skipped with a notice** — it must never turn a working install
     into a failed one, and the minimal-host claim is `sh`, `tar`, `gzip`.
-  - `docker/compose.yaml:82` mounts `../relocate` into the verify service for the
+  - `docker/compose.yaml:95` mounts `../relocate` into the verify service for the
     sole purpose of reaching this script. Once it ships in the tree, that mount is
     removable — a smaller, more honest verify surface.
-- **`mk/common.mk`** — `INSTALLER := ...` beside `TARBALL` (line 62).
+- **`mk/common.mk`** — `INSTALLER := ...` beside `TARBALL` (line 80).
 - **`mk/stages.mk`** — `installer: dist` and `installer-check: installer`, each
   with a `## ` help line and a `.PHONY` entry, env-passing shaped like the
-  `distcheck` recipe (lines 187-193); `all: distcheck installer-check`; `INSTALLER`
-  added to `print-config` (lines 222-236). Both depend transitively on `dist`; the
+  `distcheck` recipe (lines 184-190); `all: distcheck installer-check`; `INSTALLER`
+  added to `print-config` (lines 244-263). Both depend transitively on `dist`; the
   extra work is seconds.
-- **`docker/compose.yaml:88-100`** — the `verify` service runs the `.run` when one
-  is present in `/dist`, falling back to the tarball path otherwise. The `.run`
-  needs nothing mounted but `/dist`, which states the claim more sharply than the
-  current path does.
+- **`docker/compose.yaml:101-112`** — the `verify` service runs **both** legs in
+  the one job: the tarball at a different depth exactly as today, then the `.run`
+  into a second prefix, when one is present in `/dist`. Not "prefer the `.run`" —
+  that would quietly retire the tarball path that `distcheck` and A38 were won on.
+  The `.run` leg needs nothing mounted but `/dist`, which states the minimal-host
+  claim more sharply than the current path does.
 - **`.github/workflows/stack.yml`** — the build job already runs `make all`, so
   extending `all` gates the `.run` in CI for free. Widen the publish step
-  (lines 612-619) to carry the `.run` and `SHA256SUMS` alongside the tarball, and
-  add the `.run` leg to the `verify` matrix.
+  (lines 690-697) to carry the `.run` and `SHA256SUMS` alongside the tarball. The
+  `verify` matrix needs no new dimension: both legs run inside each of the five
+  existing jobs, which is coverage without ten more runners.
 - **`README.md`** — the one-file path in "Using the artifact", beside `tar xzf`.
 
 ## Where it gets proven
@@ -272,7 +303,8 @@ needs", and the same matrix that produced A38.
 - `make installer-check` — payload-identity diff, reproducibility, checksum,
   install into a deep path containing a space, activate, smoke, read-only re-run.
   Runs under `make all`, on `linux-64` and `linux-aarch64`.
-- The CI `verify` matrix runs the `.run` itself on all five base images.
+- The CI `verify` matrix runs the `.run` itself on all five base images, in the
+  same job that runs the tarball, so neither path is traded for the other.
 - Locally, the interesting one:
   `VERIFY_IMAGE=opensuse/leap:15 docker compose run --rm --build verify`.
 
