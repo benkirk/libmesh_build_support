@@ -2,16 +2,39 @@
 
 **Status:** planned, not started. Pick this up in a fresh session.
 
-## Context
+`A<n>` cites the amendments in
+[`implemented/RELOCATABLE-STACK-PLAN.md`](implemented/RELOCATABLE-STACK-PLAN.md),
+the same convention `docs/DESIGN.md` uses.
 
-Vendor toolchains ship as a single executable shell script with a compressed
-payload baked in — Intel oneAPI, NVIDIA's `.run` files, `makeself` output,
-Miniforge. You run one file, it unpacks and installs itself. This repo is already
-one header away from producing the same thing, because the hard part — a payload
-that actually relocates — is done and proven.
+## What this is for
 
-`make dist` builds the relocatable `stack/` tree and tars it
-(`mk/stages.mk:177-184`) into
+Ranked, because everything below is judged against this list and the ranking is
+what makes the design fall out:
+
+1. **Refuse an unsuitable host before writing 111 MB.** glibc under the *measured*
+   floor, a CPU under `ISA_BASELINE`, no disk, no write permission — a named
+   refusal in seconds, on the machine, at install time. This is the only goal a
+   `.tar.gz` cannot serve, and it is the reason to build the thing at all. Today
+   the failure mode is `Illegal instruction` in someone's batch job three days
+   later, or a loader error naming a symbol version rather than a distro.
+2. **One file.** `scp` it, run it, get a working stack. No README step, no
+   two-artifact handoff.
+3. **Integrity now, provenance later.** An embedded SHA-256 the artifact checks
+   against itself, plus `dist/SHA256SUMS` for the `.run` itself. Signing and
+   attestation are named in "Not doing" — they are a different project.
+4. **A tree that can verify itself after install**, with no repo present.
+5. **No second packing path.** The payload is the `distcheck`-proven `.tar.gz`,
+   byte for byte. If it is repacked, the `.run` inherits none of the guarantees
+   that make this repo worth anything.
+6. **No new builder dependency, and still reproducible** (`SOURCE_DATE_EPOCH`).
+
+Goal 1 is the product. Extraction is plumbing — `tar xzf` has done it correctly
+for forty years, and a wrapper that only wraps it is a worse `tar`.
+
+## What is already done
+
+`make dist` builds the relocatable `stack/` tree and tars it reproducibly
+(`mk/stages.mk:179-185`) into
 `dist/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).tar.gz`
 (`mk/common.mk:62`). `make distcheck` then *proves* that tarball: it unpacks at a
 different path depth, under a directory whose name contains a space, moves the
@@ -21,147 +44,255 @@ self-activates via `stack/activate.sh`, which derives its own root from
 `$BASH_SOURCE` and bakes in no absolute paths (`stack/activate.sh.in`).
 
 The repo also already *consumes* this pattern: `conda/bootstrap.sh:49-51`
-downloads `Miniforge3-Linux-*.sh` and runs `bash miniforge.sh -b -f -p $PREFIX` —
-a self-extracting installer, used as a build-time input.
+downloads `Miniforge3-Linux-*.sh` and runs `bash miniforge.sh -b -f -p $PREFIX`.
 
-We want to **wrap the same, already-proven tarball** into a single self-extracting
-`.run`, add a gate that proves the `.run` the way `distcheck` proves the tarball,
-and upload it from CI. The `.tar.gz` stays; the `.run` is an additive
-convenience — one file to get the stack onto real hardware.
+So the hard part — a payload that actually relocates — is done. What is missing is
+the part that runs *before* the payload lands.
 
-Decisions taken up front: **hand-rolled `#!/bin/sh` header** (no `makeself`
-dependency — it keeps the artifact auditable and matches this repo's
-hand-written scripts and its minimal-host claim), and a **full self-installing
-UX** (`--prefix`, `--extract-only`, `-b`/batch, `--check`, `--info`, an activate
-hint, and an optional post-extract runtime validate).
+## Why not `makeself`
+
+An earlier revision of this plan dismissed `makeself` in one clause — "no
+dependency, keeps the artifact auditable". That is a preference, not a
+measurement, and it is not why. The decision survives, but the reasons are
+different and worth writing down so nobody re-opens it on the wrong grounds.
+
+**It is not a licensing question.** `makeself` is GPL-2.0, and its README states
+that archives it generates need not be placed under that license. Whatever
+objection a reader is about to raise, it is not this one.
+
+**What we give up is real,** and pretending otherwise is how a plan gets
+overturned six months later: `--list`, `--check`, `--info`, `--lsm`, `--keep`,
+`--nodiskspace`, `--license`, `--nooverwrite`, a choice of compressors, and
+roughly twenty-five years of accumulated edge cases (2.7.1 at the time of
+writing). That is not nothing, and most of it is UX we now have to write.
+
+**What decides it, in order:**
+
+- **Payload identity.** `makeself` tars a *directory*. Pointing it at `$STACK`
+  creates a second packing path that can drift from `mk/stages.mk:182-184`, and
+  re-opens reproducibility, which then has to be re-established through
+  `--tar-extra` and `--packaging-date`. Nesting our existing `.tar.gz` inside a
+  `makeself` archive instead preserves identity — but the archive stages its
+  payload through a temporary directory before the startup script runs, so a
+  111 MB artifact costs a full extra copy on disk and double the I/O, on hosts
+  whose `/tmp` we do not control. `tail -c +N "$0" | tar -xzf - -C "$prefix"`
+  materialises nothing.
+- **Ordering.** `makeself`'s startup script runs *after* extraction.
+  `--notemp` / `--current` / runtime `--target` change *where*, not *when*. Goal 1
+  requires before. We would be fighting the tool over its central design choice,
+  and losing that fight quietly.
+- **Portability we do not have to buy.** `makeself`'s value is breadth: AIX,
+  Solaris, HP-UX, Cygwin, WSL. The support matrix here is five glibc Linux images
+  (`docker/bases.env`). That is ~1600 lines of generality bought for none of it.
+
+**And what we therefore owe:** progress output, traps that clean up a partial
+extraction, umask and chown-as-root behaviour (`makeself` has `--nochown` for a
+reason — extracting as root can rewrite ownership in ways the caller did not
+ask for), and a documented exit-code table. These are header requirements below,
+not omissions.
 
 ## How a self-extracting installer works
 
 A `.run` is three things concatenated into one executable file:
 **`[shell header]` + `[marker line]` + `[raw tarball bytes]`**. When run:
 
-1. The shell executes the header text at the top and stops at the last header
-   command; it never parses the binary payload below it.
-2. The header finds where the payload starts — a unique marker line, then
-   `N=$(awk '/^__PAYLOAD_BELOW__$/{print NR+1; exit}' "$0")`.
-   `tail -n +$N "$0"` streams every byte from that line onward verbatim (safe for
-   binary: `tail` copies bytes once it has located the Nth line start).
-3. It pipes those bytes into the extractor:
-   `tail -n +$N "$0" | tar -xzf - -C "$prefix"`. `$0` is the script itself, which
-   is how it reads its own payload.
-4. Everything else is header polish: argument parsing, an embedded SHA-256 checked
-   before extracting, a license gate (Intel), progress output, post-install steps.
+1. The shell executes the header text at the top. **The header must end in
+   `exit 0`.** `sh` reads a script in blocks, and without a terminating `exit` it
+   can read on into the payload — on some shells, on some block boundaries, which
+   is the worst way to find out.
+2. The header locates the payload by **byte offset**, not by line number:
+   `tail -c +$((OFFSET + 1)) "$0"`.
+3. That streams into the extractor:
+   `tail -c +$((OFFSET + 1)) "$0" | tar -xzf - -C "$prefix"`. `$0` is the script
+   itself, which is how it reads its own payload.
+4. Everything else is header: preflight, checksum, argument parsing, output.
 
-`makeself`, `shar`, and the Intel/NVIDIA/Miniforge installers are all this shape,
-differing only in header richness. We hand-roll so there is no build-time
-dependency and nothing in the shipped artifact we did not write.
+Two hazards, both of which the obvious implementation walks straight into:
+
+- **Marker self-match.** The usual trick —
+  `N=$(awk '/^__PAYLOAD_BELOW__$/{print NR+1; exit}' "$0")` — searches for a
+  string the header itself contains, and takes the *first* match. Byte offsets
+  sidestep it. Keep a marker line anyway, as a boundary a human (or `file`, or
+  `head`) can see; just do not compute from it.
+- **`awk` over binary.** Line-scanning a mostly-binary file is a locale and NUL
+  hazard for no benefit once the offset is known at assembly time.
+
+**Getting the offset without a fixpoint:** substitute `@PAYLOAD_OFFSET@` with a
+zero-padded fixed-width number (`0000000000`), measure the assembled header's
+byte length, then substitute the real value *at the same width*. The length does
+not change, so one measurement pass is exact. No iteration, no guessing.
 
 ## Design in this repo
 
-One stage, after `dist`, reusing the existing tarball byte-for-byte:
+One stage after `dist`, reusing the existing tarball byte for byte:
 
 ```
 ... -> dist (tar.gz) -> installer (.run = header + that tar.gz) -> installer-check
 ```
 
 The `.run` payload **is** the proven tarball, so the installer inherits every
-guarantee `distcheck` establishes; the header only adds extraction and UX. Naming
-mirrors `TARBALL`:
+guarantee `distcheck` establishes; the header adds preflight, integrity and UX.
+Naming mirrors `TARBALL`:
 `INSTALLER := $(DIST_DIR)/$(DIST_NAME)-$(DIST_VERSION)-$(TARGET_PLATFORM)-$(BLAS_PROVIDER)-glibc$(GLIBC_FLOOR).run`.
+
+### Preflight — the substance of the header
+
+Order is **preflight → integrity → extract → post-validate**, and each stage owns
+an exit code, so a batch install can branch on *why* rather than on a log:
+
+| code | meaning |
+|---|---|
+| 0 | installed |
+| 2 | usage error |
+| 3 | host unsuitable — preflight refused |
+| 4 | integrity failure |
+| 5 | extraction failure |
+| 6 | post-install validation failure |
+
+Every check below needs only `/proc`, `df` and shell:
+
+- **glibc** — the host's (`getconf GNU_LIBC_VERSION`, else `ldd --version`) against
+  the baked-in **`glibc_floor_measured`**. Measured, not requested: the manifest
+  records both because they are not the same number
+  (`relocate/validate.sh:390-391`; 2.27 measured against a 2.28 request, per the
+  README table). Refusing on the requested floor would turn away hosts the
+  artifact demonstrably runs on — and A4 is the amendment that exists because that
+  distinction was learned the hard way.
+- **ISA** — `x86-64-v2` needs `cx16 lahf_lm popcnt sse3 sse4_1 sse4_2 ssse3` in
+  `/proc/cpuinfo` `flags`; `armv8.1-a` needs `atomics` (LSE) in `Features`. The
+  aarch64 case is A21 exactly: conda-forge emits unguarded LSE atomics in
+  libraries we do not build, so "it is only a compiler flag" is false and the
+  binary really will not run.
+- **Disk** — `df -Pk "$prefix"` against a baked-in installed size.
+- **Prefix** — writable; refuse a non-empty target unless `--force`.
+- **Tools** — `tar` *and* `gzip`. A38 is the reason `gzip` is named separately:
+  `opensuse/leap:15` ships `tar` without it, GNU tar's `-z` execs `gzip`, and the
+  resulting `tar (child): gzip: Cannot exec` reads like a corrupt download. The
+  installer should say the true thing instead.
+- **SHA-256 — degrade, do not block.** Try `sha256sum`, then `shasum -a 256`, then
+  `openssl dgst -sha256`; if none exists, warn and continue. gzip's CRC and tar's
+  own structure already catch *corruption*, so the checksum is the tamper check,
+  not the integrity check, and a missing tool must not block an install that is
+  about to verify itself anyway. `--check` on its own is the exception: there the
+  user asked for exactly that answer, so no tool means exit 4.
+
+### UX
+
+- **`--prefix DIR` installs *as* `DIR`.** `activate.sh` lands at
+  `DIR/activate.sh`, via `tar --strip-components=1`. This is Miniforge's `-p`,
+  which this repo already drives (`conda/bootstrap.sh:49-51`), and Intel's and
+  NVIDIA's convention — a customer typing `--prefix /opt/libmesh-stack` and
+  getting `/opt/libmesh-stack/stack/` would be right to file a bug. The assembler
+  asserts the tarball has exactly one top-level entry, `stack/`, so the strip can
+  never be silently wrong.
+- Default prefix `$PWD/<DIST_NAME>-<DIST_VERSION>`. Never splat into `$PWD`.
+- **`--extract-only [--dest DIR]`** reproduces the literal `DIR/stack` layout —
+  what `tar xzf` gives today. This is the mode `installer-check` diffs against a
+  plain untar of `$TARBALL`.
+- Non-interactive by default: scripted installs on a login node are the normal
+  case, not the exception. `--confirm` prompts; `-b` / `--batch` is accepted as
+  quiet-and-no-prompt, for muscle memory carried over from Miniforge.
+- `--info` (the baked-in metadata), `--check`, `--list`, `--force`,
+  `--skip-validate`, `--quiet`, `--help`, `--version`.
+- On success, print the activate line for the prefix that was actually resolved,
+  not a generic one.
+
+### Metadata comes from the manifest, not from make
+
+The header's facts are read out of `stack/etc/stack-manifest.json` **inside the
+tarball**, with `tar -xzOf "$TARBALL" stack/etc/stack-manifest.json` — the same
+move CI already makes at `.github/workflows/stack.yml:527`. The `.run` then
+describes the artifact rather than the build that was requested, which is the
+distinction A37 was issued over. Bake in: name, version, platform, BLAS/MPI,
+`glibc_floor_measured` *and* `_requested`, `isa_baseline`, `package_count`,
+`git_sha`, `build_date`, payload SHA-256, payload bytes, installed KB.
 
 ### Files to add
 
 - **`relocate/installer-header.sh.in`** — the header template, `#!/bin/sh`, POSIX.
-  Build-time placeholders substituted by the assembler: `@DIST_NAME@`,
-  `@DIST_VERSION@`, `@TARGET_PLATFORM@`, `@GLIBC_FLOOR@`, `@ISA_BASELINE@`,
-  `@PAYLOAD_SHA256@`, `@PAYLOAD_BYTES@`. Behavior:
-  - `--help` / `--version` / `--info` (name, version, platform, glibc floor, size,
-    sha256 — like `makeself --info`); `--prefix DIR` (default `$PWD`);
-    `--extract-only`; `-b`/`--batch` (non-interactive, quiet); `--check` (verify
-    the embedded SHA-256 against the payload, then exit without extracting);
-    `--skip-validate`; `--force`.
-  - Preconditions: require `tar`, `gzip`, and a sha256 tool
-    (`sha256sum`/`shasum -a 256`); refuse to overwrite a non-empty `$prefix/stack`
-    unless `--force`.
-  - Verify `tail -n +$N "$0" | sha256sum` equals `@PAYLOAD_SHA256@` before
-    extracting (escape hatch only via an explicit flag).
-  - Extract with `tail -n +$N "$0" | tar -xzf - -C "$prefix"` → `$prefix/stack`.
-  - Post-extract self-check (unless `--extract-only`/`--skip-validate`): run the
-    shipped runtime validator (below) in `--runtime` mode — loader-only, no host
-    Python — with the baked-in `GLIBC_FLOOR`/`ISA_BASELINE`.
-  - On success, print the activate hint: `source <prefix>/stack/activate.sh`.
-
-- **`relocate/make-installer.sh`** — the assembler. Reads `TARBALL`, computes its
-  SHA-256 and byte count, substitutes the header placeholders, writes
-  `header` + `\n__PAYLOAD_BELOW__\n` + `<tarball bytes>` to `INSTALLER`, then
-  `chmod +x`. No timestamps of its own (respects `SOURCE_DATE_EPOCH`); since the
-  payload is the reproducible tarball, the `.run` is reproducible too.
-
-- **`test/installer-check.sh`** — the gate, mirroring `test/distcheck.sh`: run
-  `INSTALLER --check` (checksum), then `--prefix` into a **deep path containing a
-  space**, confirm `activate.sh` works, run the smoke binaries via
-  `test/run.sh relocated`, and re-run **read-only**. Reuses `test/run.sh` and
-  `relocate/validate.sh` exactly as `distcheck.sh` does.
+  Placeholders substituted by the assembler (`@PAYLOAD_OFFSET@`,
+  `@PAYLOAD_SHA256@`, `@PAYLOAD_BYTES@`, `@INSTALLED_KB@`, and the manifest
+  fields). Implements the preflight, exit codes, UX and post-extract self-check
+  above.
+- **`relocate/make-installer.sh`** — the assembler. Reads `TARBALL`, extracts the
+  manifest, computes SHA-256 / payload bytes / installed size, does the two
+  width-stable substitution passes, concatenates header + marker + payload,
+  `chmod +x`. No timestamps of its own (`SOURCE_DATE_EPOCH`); the payload is the
+  reproducible tarball, so the `.run` is reproducible too. Also writes
+  `dist/SHA256SUMS` covering both artifacts — the embedded checksum covers the
+  payload, and nothing else covers the header.
+- **`test/installer-check.sh`** — the gate, mirroring `test/distcheck.sh` and both
+  of its deliberate cruelties (different depth, a space in the path). Runs
+  `--check`; installs into `".../a b/c/install"`; sources `activate.sh`; runs the
+  smoke binaries via `test/run.sh relocated`; re-runs read-only. Plus two checks
+  `distcheck` has no reason to make:
+  - **`--extract-only` output diffed against a plain `tar xzf` of `$TARBALL`.**
+    Payload identity is the premise this entire design rests on; assert it.
+  - **Assemble twice, compare SHA-256.** Reproducibility is a claim this repo
+    tests rather than states.
 
 ### Files to modify
 
-- **`relocate/fixup-text.sh`** (~line 267, where `activate.sh` is installed): also
-  install `relocate/validate.sh` into the tree as `stack/libexec/stack-validate.sh`
-  so the *installed* tree can self-verify with no repo present. `--runtime` mode is
-  loader-only and never touches `depsolve.py` (that is on the `--full` path), so it
-  ships cleanly. This makes both the tarball and the installer self-verifying — in
-  keeping with the project's "prove it, don't claim it" ethos.
+- **`relocate/fixup-text.sh:285-289`**, where `activate.sh` is installed: also
+  install `relocate/validate.sh` as `stack/libexec/stack-validate.sh`, so the
+  *installed* tree can verify itself with no repo present. `--runtime` is
+  loader-only and never reaches `depsolve.py` (`relocate/validate.sh:191`), so it
+  ships cleanly. Two consequences to handle rather than discover:
+  - It is `#!/usr/bin/env bash`. On a host without bash the post-extract
+    self-check is **skipped with a notice** — it must never turn a working install
+    into a failed one, and the minimal-host claim is `sh`, `tar`, `gzip`.
+  - `docker/compose.yaml:82` mounts `../relocate` into the verify service for the
+    sole purpose of reaching this script. Once it ships in the tree, that mount is
+    removable — a smaller, more honest verify surface.
+- **`mk/common.mk`** — `INSTALLER := ...` beside `TARBALL` (line 62).
+- **`mk/stages.mk`** — `installer: dist` and `installer-check: installer`, each
+  with a `## ` help line and a `.PHONY` entry, env-passing shaped like the
+  `distcheck` recipe (lines 187-193); `all: distcheck installer-check`; `INSTALLER`
+  added to `print-config` (lines 222-236). Both depend transitively on `dist`; the
+  extra work is seconds.
+- **`docker/compose.yaml:88-100`** — the `verify` service runs the `.run` when one
+  is present in `/dist`, falling back to the tarball path otherwise. The `.run`
+  needs nothing mounted but `/dist`, which states the claim more sharply than the
+  current path does.
+- **`.github/workflows/stack.yml`** — the build job already runs `make all`, so
+  extending `all` gates the `.run` in CI for free. Widen the publish step
+  (lines 612-619) to carry the `.run` and `SHA256SUMS` alongside the tarball, and
+  add the `.run` leg to the `verify` matrix.
+- **`README.md`** — the one-file path in "Using the artifact", beside `tar xzf`.
 
-- **`mk/common.mk`** — add the `INSTALLER := ...` variable next to `TARBALL`
-  (line 62); add it to the `print-config` block (`mk/stages.mk:209-222`).
+## Where it gets proven
 
-- **`mk/stages.mk`** — add targets and `.PHONY` entries, each with a `## ` help
-  line:
-  - `installer: dist` → `$(SAY) RUN` then `bash relocate/make-installer.sh`,
-    passing `DIST_NAME/DIST_VERSION/TARGET_PLATFORM/GLIBC_FLOOR/ISA_BASELINE/
-    TARBALL/INSTALLER` in the env, like the other stage recipes.
-  - `installer-check: installer` → `bash test/installer-check.sh`, with the same
-    env shape as the `distcheck` recipe (`mk/stages.mk:187-192`).
-  - Extend the default goal to `all: distcheck installer-check` so `make all`
-    proves the installer too. Both depend transitively on `dist`; the extra `tar`
-    is seconds. (Alternative: `installer: distcheck`, wrapping only a
-    distcheck-passed tarball, with `all: installer-check`.)
+Inside the builder image is the *weakest* place to gate this: it is the one host
+guaranteed to have every tool, so "needs only `sh`, `tar` and `gzip`" would stay
+an assertion. The real gate is the five-distro `verify` matrix, on pristine images
+poorer than the one that built the artifact — the same reasoning that makes
+`Dockerfile.verify`'s package list "the honest answer to what a customer's machine
+needs", and the same matrix that produced A38.
 
-- **`.github/workflows/stack.yml`** — the build job already runs `make all`
-  (~line 412), so extending `all` builds and gates the `.run` in CI for free.
-  Widen the tarball upload (path `dist/*.tar.gz`, ~lines 572-579) to include
-  `dist/*.run` so it is downloadable as a workflow artifact alongside the
-  `.tar.gz`.
+- `make installer-check` — payload-identity diff, reproducibility, checksum,
+  install into a deep path containing a space, activate, smoke, read-only re-run.
+  Runs under `make all`, on `linux-64` and `linux-aarch64`.
+- The CI `verify` matrix runs the `.run` itself on all five base images.
+- Locally, the interesting one:
+  `VERIFY_IMAGE=opensuse/leap:15 docker compose run --rm --build verify`.
 
-## Verification (end to end)
+By hand, once built:
 
 ```sh
-make all                      # now ends: ... dist -> distcheck -> installer -> installer-check
-ls -l dist/*.run              # exists and is executable
-
+make all                      # ... dist -> distcheck -> installer -> installer-check
 RUN=dist/libmesh-stack-*.run
-sh "$RUN" --info                          # metadata
-sh "$RUN" --check                         # verify embedded SHA-256
-sh "$RUN" --prefix "/tmp/it works/deep"   # install into a path with a space
-. "/tmp/it works/deep/stack/activate.sh"  # hint printed by the installer
-mpicc --version                            # a prebuilt binary resolves and runs
+
+sh "$RUN" --info                            # what it is, measured not requested
+sh "$RUN" --check                           # embedded SHA-256
+sh "$RUN" --prefix "/tmp/it works/deep/stack"
+. "/tmp/it works/deep/stack/activate.sh"    # the line the installer printed
+mpicc --version                             # a prebuilt binary resolves and runs
 ```
 
-- `make installer-check` is the automated gate (checksum + weird-depth extract +
-  validate + smoke + read-only re-run). It and `distcheck` both run under
-  `make all`, on `linux-64` and `linux-aarch64`, across the CI base images.
-- Container loop unchanged: `cd docker && docker compose run --rm shell` then
-  `make all`; the pristine `verify` service exercises the tarball, and the `.run`
-  can be spot-checked the same way.
+## Not doing
 
-## Notes / decisions
-
-- **Hand-rolled, not `makeself`** — zero new dependency; the header stays
-  auditable and matches the repo's hand-written scripts.
-- **Payload = the existing tarball** — no second packing path to drift; the `.run`
-  is strictly the proven `tar.gz` plus a header.
-- **`#!/bin/sh` POSIX header** — must run on a bare host, the same minimal-host
-  claim `docker/Dockerfile.builder` encodes; depends only on `sh`, `tar`, `gzip`,
-  and a sha256 tool.
-- **Additive artifact** — the `.tar.gz` remains; the `.run` is an extra
-  convenience for getting the stack onto real hardware in one file.
+Named so a future session does not re-derive them: signing and provenance
+attestation (a different project, with key management attached); delta or split
+payloads; a modulefile or Spack-package generator; anything Windows or macOS. The
+`.tar.gz` stays either way — the `.run` is additive, and the day it becomes the
+only way to get the stack is the day this was a mistake.
