@@ -123,18 +123,25 @@ services:
           # all -- which is exactly how the first version of this leg failed on
           # aarch64, and why it could not be diagnosed from CI.  A bounded
           # phase turns that into one line naming what stopped.
+          # 'rc=$$?' after 'if ! cmd' is ALWAYS 0 -- the '!' inverts the status
+          # before $$? is read, so the first version of this reported
+          # "FAILED ... (exit 0)" on a real SIGTERM.  Capture with '|| rc=$$?'.
           phase () {
             lim=$$1; name=$$2; shift 2
             echo "--- [$${name}] (limit $${lim}s)"
-            if ! timeout "$${lim}" "$$@"; then
-              rc=$$?
-              if [ "$$rc" -eq 124 ]; then
-                echo "::error::the .run leg HUNG in [$${name}] (over $${lim}s)" >&2
-              else
-                echo "::error::the .run leg FAILED in [$${name}] (exit $${rc})" >&2
-              fi
-              exit "$$rc"
-            fi
+            rc=0
+            timeout "$${lim}" "$$@" || rc=$$?
+            [ "$$rc" -eq 0 ] && return 0
+            case "$$rc" in
+              124) echo "::error::the .run leg HUNG in [$${name}] (over $${lim}s)" >&2 ;;
+              # 143/130 are the runner going away underneath us -- GitHub
+              # reclaiming the machine, not the installer misbehaving.  Naming
+              # it stops the next person debugging the wrong thing.
+              143) echo "::error::[$${name}] killed by SIGTERM: the RUNNER shut down, not the installer" >&2 ;;
+              130) echo "::error::[$${name}] killed by SIGINT: the RUNNER shut down, not the installer" >&2 ;;
+              *)   echo "::error::the .run leg FAILED in [$${name}] (exit $${rc})" >&2 ;;
+            esac
+            exit "$$rc"
           }
           phase  60 info    sh "$$r" --info
           phase 300 check   sh "$$r" --check
