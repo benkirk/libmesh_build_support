@@ -30,7 +30,8 @@ on:
         description: >
           Run a single job instead of the whole matrix.  One of: fresh-solve,
           mkl, hdf5-parallel, libmesh-git, builder-distro, customer-demo-stack,
-          dirty-host.  Blank runs all of them, which is what the schedule does.
+          consumer-stack, dirty-host.  Blank runs all of them, which is what the
+          schedule does.
           This exists because each job here is a full ~40-minute stack build,
           and iterating on one unproven knob should not cost the other eight.
         type: string
@@ -195,6 +196,43 @@ jobs:
       target_platform: linux-64
       source_ref: customer_demo
       site_dirs: customer
+      verify_bases: 'almalinux:8 ubuntu:24.04'
+      experimental: true
+
+  #-----------------------------------------------------------------------------
+  # The consumer template's stack, built for real.
+  #
+  # examples/consumer/ is the OTHER customer-packaging shape: the customer's own
+  # repo is the top level, this repo is a git submodule, and their packages
+  # (hello on libMesh, then goodbye on the customer's own hello) are driven by a
+  # thin wrapper Makefile through SITE_DIRS.  checks.yml proves the wiring in
+  # seconds against no compiler -- discovery and the libmesh -> hello -> goodbye
+  # graph order, exercising the real wrapper.  What a dry run cannot answer is
+  # whether those two packages actually COMPILE against a real libMesh, survive
+  # the prune, and still resolve every library -- including the customer's own
+  # libhello.so -- through $ORIGIN once the tarball is unpacked somewhere else.
+  # Only a full build answers that, which is why this is here and not there.
+  #
+  # It reaches the packages through SITE_DIRS rather than through the wrapper:
+  # the wrapper is nothing but 'make -C build_support SITE_DIRS=<abs> ...', which
+  # checks.yml already runs end to end, so pointing stack.yml straight at
+  # examples/consumer/packages builds the identical graph with no bespoke
+  # submodule plumbing in CI.  The packages are tracked on this branch, so no
+  # source_ref is needed (unlike customer-demo-stack).
+  #
+  # linux-64 only, experimental, two verify images -- following the precedent
+  # customer-demo-stack set: prove a declared-but-unproven config on one
+  # architecture, and test the customer packages rather than the distro matrix
+  # ci.yml already covers on every PR.
+  consumer-stack:
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.only == '' || inputs.only == 'consumer-stack'
+    name: consumer template stack (linux-64)
+    uses: ./.github/workflows/stack.yml
+    with:
+      target_platform: linux-64
+      site_dirs: examples/consumer/packages
       verify_bases: 'almalinux:8 ubuntu:24.04'
       experimental: true
 

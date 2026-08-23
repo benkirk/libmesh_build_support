@@ -93,6 +93,17 @@ jobs:
           make help
           make print-config
 
+      # The submodule-consumer path: a customer whose own repo is the top level,
+      # this repo vendored as a submodule, their packages driven by the wrapper
+      # Makefile in examples/consumer/.  This synthesizes that layout and asserts
+      # the wrapper forwards, the customer packages are discovered, and the graph
+      # orders libmesh -> hello -> goodbye -- all without compiling anything, the
+      # same way customer-demo.yml gates the site/ overlay in seconds.  The real
+      # end-to-end build of these packages is the weekly consumer-stack job in
+      # extended.yml.
+      - name: Submodule consumer path
+        run: bash test/consumer-check.sh discovery
+
       # The two files that decide what CI runs against.  bases.sh is the one
       # place the image list is read from, so if it stops emitting valid JSON
       # the stack.yml matrix fails to expand -- which shows up as a confusing

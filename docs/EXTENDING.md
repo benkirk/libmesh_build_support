@@ -26,6 +26,40 @@ nothing runs it automatically today. It shows two things the template does not:
 a package with **no `PKG_URL`** (it generates its own sources), and one that
 declares `PKG_DEPS`.
 
+## Consuming this repo as a submodule
+
+`site/` layers your packages *inside* a checkout of this repo. The **submodule
+consumer** path is the mirror image: **your** repository is the top level, this
+repo is vendored as a git submodule, and you maintain nothing of ours — just
+your own `packages/<name>/{pkg.mk,build.sh}` and a one-screen wrapper `Makefile`.
+
+It is the *same* mechanism, inverted. There is no consumer-specific dialect: the
+`pkg.mk` and `build.sh` contracts below are unchanged, discovery is still
+`SITE_DIRS`, and your packages get the identical build → relocate → validate →
+pack treatment. The wrapper just points `SITE_DIRS` back at your `packages/` and
+redirects `BUILD_ROOT`/`DIST_DIR` out of the submodule checkout, then forwards
+every goal to a single sub-make:
+
+```sh
+git submodule add https://github.com/benkirk/libmesh_build_support build_support
+cp build_support/examples/consumer/Makefile .
+cp -r build_support/examples/consumer/packages .   # or write your own
+make PROFILE=stable all
+```
+
+`examples/consumer/` is the complete, tracked, copy-me template — a wrapper
+`Makefile`, plus `hello` (a shared library on libMesh) and `goodbye` (an app on
+your **own** `hello`), so it exercises a two-deep customer chain
+(`goodbye → hello → libmesh`). See its `README.md`. `build.sh` scripts there
+source `"${TOPDIR}/lib/build_common.sh"` exactly as any recipe does — `TOPDIR`
+is the submodule root, supplied by the framework, so it resolves even though
+your recipe lives outside the submodule.
+
+Two gates keep this path working: `checks.yml` runs `test/consumer-check.sh
+discovery` on every push (the wrapper forwards, packages are discovered, graph
+orders `libmesh → hello → goodbye`), and the weekly `consumer-stack` job in
+`extended.yml` builds those packages for real.
+
 ## Iterating on a recipe
 
 ```sh
