@@ -1,0 +1,4 @@
+# A consumer repo's build products, mirroring the top-level repo's .gitignore.
+# BUILD_ROOT and DIST_DIR are redirected here by the wrapper Makefile.
+_root/
+dist/
